@@ -1,0 +1,398 @@
+---
+title: "Longitudinal microbiome analysis "
+author: "kim soyeon"
+date: "2026-05-26"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+# 목적 
+
+
+## Longitudinal microbiome 분석 방법 
+
+### Alpha diverseity 검정 
+- 통계검정: 
+  - Linear mixed mode (`lme4`)
+  - generalized mixed model (`glmmTMB`)
+  - GAM: 비선형 시간 변화
+  - GEE: repeated/clustered average effect
+
+### Beta diversity 
+- 통계검정 
+  - Group*Time 혼합구조 PEMANOVA (`vegan::adonis2`)
+  - Group*Time*repeated measure PEMANOVA + strata 
+  
+### 시간에 따른 biomarker
+- 통계검정
+  - ANCOM-BC2
+  - MsAsLin3
+
+  - Mixed model
+
+### 어느 시점에서 달라지는가?
+- 통계검정
+  - GAM
+  - MetagenomeSeq::filTimeSeries
+  
+  
+  
+# 데이터셋
+
+
+```{r}
+# ============================================================
+#  curatedMetagenomicData: DIABIMMUNE + IBDMDB 데이터 접근 및 탐색
+#  - KosticAD_2015  (DIABIMMUNE / T1D 영아 종단)
+#  - LloydPrice_2019 (IBDMDB / IBD 종단 multi-omics)
+#
+# ============================================================
+
+
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+pkgs <- c(
+  "curatedMetagenomicData",  # 메인 데이터 패키지
+  "SummarizedExperiment",    # SE 객체 조작
+  "TreeSummarizedExperiment",
+  "dplyr",                   # 데이터 조작
+  "ggplot2",                 # 시각화
+  "vegan",                   # 다양성 분석 (alpha/beta)
+  "pheatmap",                # 히트맵
+  "patchwork"                # 플롯 조합
+)
+
+invisible(lapply(pkgs, function(p) {
+  if (!requireNamespace(p, quietly = TRUE))
+    BiocManager::install(p, ask = FALSE)
+  library(p, character.only = TRUE)
+}))
+
+```
+
+
+```{r}
+
+# ============================================================
+#  SECTION 1 : 사용 가능한 데이터셋 목록 확인
+# ============================================================
+
+# cMD에서 제공하는 전체 study 목록 미리보기
+all_studies <- sampleMetadata |>
+  dplyr::distinct(study_name) |>
+  dplyr::pull(study_name)
+
+message("cMD에 수록된 전체 study 수: ", length(all_studies)) # 93
+
+# 우리가 관심 있는 두 study 확인
+target_studies <- c("KosticAD_2015", "LloydPrice_2019")
+cat("\n관심 study 존재 여부:\n")
+print(target_studies %in% all_studies) # true, false 
+
+# 두 study의 sample 수 미리 확인
+sampleMetadata |>
+  dplyr::filter(study_name %in% target_studies) |>
+  dplyr::count(study_name, name = "n_samples") |>
+  print() # 120
+```
+
+
+```{r}
+
+# ============================================================
+#  SECTION 2 : DIABIMMUNE — KosticAD_2015 데이터 로드
+# ============================================================
+
+# 사용 가능한 resource 타입 먼저 확인 (dryrun = TRUE)
+curatedMetagenomicData("KosticAD_2015", dryrun = TRUE)
+# 2021-03-31.KosticAD_2015.gene_families
+# 2021-03-31.KosticAD_2015.marker_abundance
+# 2021-03-31.KosticAD_2015.marker_presence
+# 2021-03-31.KosticAD_2015.pathway_abundance
+# 2021-03-31.KosticAD_2015.pathway_coverage
+# 2021-03-31.KosticAD_2015.relative_abundance
+
+# relative_abundance 데이터 로드 (TreeSummarizedExperiment)
+kostic_tse <- curatedMetagenomicData(
+  "KosticAD_2015.relative_abundance",
+  dryrun  = FALSE,
+  counts  = FALSE   # 상대 풍부도 그대로 반환
+)[[1]]
+
+
+# ── 2-1. 기본 구조 확인 ────────────────────────────────────
+print(kostic_tse)
+
+cat("\n--- Dimensions ---\n")
+cat("  Features (taxa) :", nrow(kostic_tse), "\n") # 330
+cat("  Samples         :", ncol(kostic_tse), "\n") # 120
+
+# ── 2-2. 메타데이터 탐색 ───────────────────────────────────
+cat("\n--- Column (sample) metadata 컬럼 목록 ---\n")
+meta_k <- as.data.frame(colData(kostic_tse))
+print(names(meta_k))
+#  [1] "study_name"                 "subject_id"                 "body_site"                 
+#  [4] "study_condition"            "disease"                    "age"                       
+#  [7] "infant_age"                 "age_category"               "gender"                    
+# [10] "country"                    "non_westernized"            "sequencing_platform"       
+# [13] "DNA_extraction_kit"         "PMID"                       "number_reads"              
+# [16] "number_bases"               "minimum_read_length"        "median_read_length"        
+# [19] "NCBI_accession"             "curator"                    "days_from_first_collection"
+# [22] "born_method"                "feeding_practice"           "disease_subtype"           
+# [25] "HLA"                        "autoantibody_positive"      "age_seroconversion"        
+# [28] "age_T1D_diagnosis"         
+
+meta_k$subject_id %>% unique %>% length # 19
+
+meta_k  %>% 
+  group_by(subject_id) %>% 
+  summarise(Count = n())
+#    subject_id Count
+#    <chr>      <int>
+#  1 E001463        6
+#  2 E003251        5
+#  3 E003989        7
+#  4 E006547        5
+#  5 E006574       10
+#  6 E006673        4
+#  7 E010590        9
+#  8 E010629        3
+#  9 E010937        9
+# 10 E016924        6
+# 11 E017751        7
+# 12 E018113        8
+# 13 E018268        7
+# 14 E022137        5
+# 15 E022852        4
+# 16 E026079        4
+# 17 T013815        8
+# 18 T014292        6
+# 19 T025418        7
+
+# 핵심 종단 변수 확인
+
+
+
+cat("\n--- 주요 임상 변수 분포 ---\n")
+cat("\n[study_condition]\n")
+print(table(meta_k$study_condition, useNA = "always"))
+# control     T1D    <NA> 
+#      89      31       0 
+cat("\n[age_category]\n")
+print(table(meta_k$age_category, useNA = "always"))
+  # child newborn    <NA> 
+  #    95      25       0 
+# age 분포 (months)
+cat("\n[age_months summary]\n")
+print(summary(meta_k$age))
+
+# subject 수 (종단 구조 확인)
+if ("subject_id" %in% names(meta_k)) {
+  n_subj <- dplyr::n_distinct(meta_k$subject_id)
+  cat("\n고유 subject 수:", n_subj,
+      "/ 총 샘플:", ncol(kostic_tse),
+      "→ 평균 time points per subject:",
+      round(ncol(kostic_tse) / n_subj, 1), "\n")
+}
+# 고유 subject 수: 19 / 총 샘플: 120 → 평균 time points per subject: 6.3 
+
+
+
+```
+
+
+
+# 분석 예시 
+```{r}
+# ── 2-3. Taxonomy 구조 확인 ────────────────────────────────
+cat("\n--- Taxonomy ranks 포함 여부 ---\n")
+if (!is.null(rowData(kostic_tse))) {
+  print(names(rowData(kostic_tse)))
+}
+
+# 상위 20 taxa (평균 상대풍부도 기준)
+top20_kostic <- rowMeans(assay(kostic_tse, "relative_abundance"), na.rm = TRUE) |>
+  sort(decreasing = TRUE) |>
+  head(20)
+
+cat("\n--- Top 20 taxa (평균 relative abundance) ---\n")
+print(round(top20_kostic * 100, 3))
+
+
+# ── 2-4. Alpha 다양성 계산 ─────────────────────────────────
+ra_k <- assay(kostic_tse, "relative_abundance")
+ra_k[is.na(ra_k)] <- 0
+
+# Shannon diversity
+shannon_k <- vegan::diversity(t(ra_k), index = "shannon")
+meta_k$shannon <- shannon_k[colnames(kostic_tse)]
+
+cat("\n--- Shannon diversity (by condition) ---\n")
+meta_k |>
+  dplyr::group_by(study_condition) |>
+  dplyr::summarise(
+    mean_shannon = round(mean(shannon, na.rm = TRUE), 3),
+    sd_shannon   = round(sd(shannon, na.rm = TRUE), 3),
+    n            = dplyr::n()
+  ) |>
+  print()
+
+# ── 2-5. 시각화 ────────────────────────────────────────────
+# (A) Shannon diversity over time, by T1D status
+if ("age" %in% names(meta_k) && "study_condition" %in% names(meta_k)) {
+  p_shannon_time <- meta_k |>
+    dplyr::filter(!is.na(age), !is.na(study_condition)) |>
+    ggplot(aes(x = age, y = shannon,
+               color = study_condition, group = study_condition)) +
+    geom_point(alpha = 0.3, size = 1.2) +
+    geom_smooth(method = "loess", se = TRUE, linewidth = 1.2) +
+    scale_color_manual(
+      values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
+      labels = c("control" = "대조군", "T1D" = "T1D 발병군")
+    ) +
+    labs(
+      title    = "DIABIMMUNE: Shannon Diversity over Time",
+      subtitle = "KosticAD_2015 | T1D vs Control (longitudinal)",
+      x        = "Age (months)",
+      y        = "Shannon Diversity",
+      color    = "Group"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(legend.position = "bottom")
+
+  print(p_shannon_time)
+}
+
+p_shannon_time
+```
+
+
+```{r}
+# (B) Top taxa boxplot (T1D vs Control)
+top5_names <- names(top20_kostic)[1:5]
+top5_df_k <- as.data.frame(t(ra_k[top5_names, , drop = FALSE])) |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::left_join(
+    tibble::rownames_to_column(meta_k, "sample_id"),
+    by = "sample_id"
+  ) |>
+  tidyr::pivot_longer(
+    cols      = dplyr::all_of(top5_names),
+    names_to  = "taxon",
+    values_to = "rel_abund"
+  )
+
+p_top5_k <- ggplot(top5_df_k,
+                   aes(x = study_condition, y = rel_abund + 1e-5,
+                       fill = study_condition)) +
+  geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
+  facet_wrap(~ taxon, scales = "free_y", ncol = 5) +
+  scale_y_log10() +
+  scale_fill_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
+  ) +
+  labs(
+    title    = "DIABIMMUNE: Top 5 Taxa — T1D vs Control",
+    subtitle = "KosticAD_2015 | log10 relative abundance",
+    x = "", y = "Relative abundance (log10)", fill = "Group"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "none",
+        strip.text = element_text(size = 7))
+
+print(p_top5_k)
+
+```
+
+
+```{r}
+#
+
+# ============================================================
+#  SECTION 5 : Beta 다양성 (Bray-Curtis PCoA)
+# ============================================================
+
+# KosticAD_2015 PCoA
+bc_k  <- vegan::vegdist(t(ra_k), method = "bray")
+pcoa_k <- cmdscale(bc_k, k = 2, eig = TRUE)
+var_k  <- round(pcoa_k$eig[1:2] / sum(pcoa_k$eig[pcoa_k$eig > 0]) * 100, 1)
+
+pcoa_df_k <- data.frame(
+  PC1       = pcoa_k$points[, 1],
+  PC2       = pcoa_k$points[, 2],
+  condition = meta_k$study_condition[match(rownames(pcoa_k$points),
+                                           rownames(meta_k))]
+) |> dplyr::filter(!is.na(condition))
+
+p_pcoa_k <- ggplot(pcoa_df_k, aes(PC1, PC2, color = condition)) +
+  geom_point(alpha = 0.6, size = 1.8) +
+  stat_ellipse(linewidth = 0.8, type = "t") +
+  scale_color_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
+    labels = c("control" = "대조군", "T1D" = "T1D")
+  ) +
+  labs(
+    title    = "DIABIMMUNE: Bray-Curtis PCoA",
+    subtitle = "KosticAD_2015",
+    x = paste0("PC1 (", var_k[1], "%)"),
+    y = paste0("PC2 (", var_k[2], "%)"),
+    color = "Group"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom")
+
+
+# 두 PCoA 나란히 출력
+print(p_pcoa_k)
+
+```
+
+
+```{r}
+# ============================================================
+#  SECTION 6 : PERMANOVA (그룹 간 차이 유의성 검정)
+# ============================================================
+
+cat("\n=== PERMANOVA (Bray-Curtis) 결과 ===\n")
+
+# KosticAD_2015
+bc_k_mat  <- as.matrix(bc_k)
+keep_k    <- rownames(bc_k_mat)[!is.na(meta_k$study_condition)]
+perm_k    <- vegan::adonis2(
+  bc_k_mat[keep_k, keep_k] ~ study_condition,
+  data    = meta_k[keep_k, ],
+  permutations = 999
+)
+cat("\n[KosticAD_2015] T1D vs Control:\n")
+print(perm_k)
+# 
+# 
+# # ============================================================
+# #  SECTION 7 : 데이터 내보내기 (TSV)
+# # ============================================================
+# 
+# out_dir <- "cMD_output"
+# if (!dir.exists(out_dir)) dir.create(out_dir)
+# 
+# # Relative abundance matrices
+# write.table(
+#   as.data.frame(assay(kostic_tse, "relative_abundance")),
+#   file = file.path(out_dir, "KosticAD_2015_relabund.tsv"),
+#   sep = "\t", quote = FALSE, col.names = NA
+# )
+# write.table(
+#   as.data.frame(colData(kostic_tse)),
+#   file = file.path(out_dir, "KosticAD_2015_metadata.tsv"),
+#   sep = "\t", quote = FALSE, col.names = NA
+# )
+
+```
