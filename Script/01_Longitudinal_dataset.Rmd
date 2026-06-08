@@ -40,8 +40,8 @@ pkgs <- c(
 )
 
 invisible(lapply(pkgs, function(p) {
-  if (!requireNamespace(p, quietly = TRUE))
-    BiocManager::install(p, ask = FALSE)
+  #if (!requireNamespace(p, quietly = TRUE))
+  #  BiocManager::install(p, ask = FALSE)
   library(p, character.only = TRUE)
 }))
 
