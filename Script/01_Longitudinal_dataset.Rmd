@@ -361,3 +361,535 @@ print(perm_k)
 # )
 
 ```
+
+
+```{r}
+# ============================================================
+#  SECTION 7 : 종단데이터 분석 준비
+# ============================================================
+
+longitudinal_pkgs <- c(
+  "lme4",       # linear mixed model
+  "lmerTest",   # p-value for lmer
+  "broom.mixed",# tidy mixed model results
+  "emmeans",    # estimated marginal means
+  "ggeffects",  # model-based prediction
+  "tidyr",
+  "dplyr",
+  "ggplot2",
+  "stringr"
+)
+
+invisible(lapply(longitudinal_pkgs, function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    install.packages(p)
+  }
+  library(p, character.only = TRUE)
+}))
+
+
+```
+
+```{r}
+
+# ============================================================
+#  SECTION 8 : Longitudinal metadata 정리
+# ============================================================
+
+meta_long <- meta_k |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::filter(
+    !is.na(subject_id),
+    !is.na(age),
+    !is.na(study_condition),
+    !is.na(shannon)
+  ) |>
+  dplyr::mutate(
+    subject_id = as.factor(subject_id),
+    study_condition = factor(study_condition, levels = c("control", "T1D")),
+    age_months = as.numeric(age)
+  )
+
+# subject별 반복 측정 수 확인
+subject_summary <- meta_long |>
+  dplyr::group_by(subject_id, study_condition) |>
+  dplyr::summarise(
+    n_timepoints = dplyr::n(),
+    min_age = min(age_months, na.rm = TRUE),
+    max_age = max(age_months, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print(subject_summary)
+
+# 반복 측정 수 분포
+ggplot(subject_summary, aes(x = n_timepoints)) +
+  geom_histogram(binwidth = 1, color = "black", fill = "grey80") +
+  labs(
+    title = "Number of repeated samples per subject",
+    x = "Number of time points",
+    y = "Number of subjects"
+  ) +
+  theme_bw(base_size = 12)
+
+```
+
+
+```{r}
+
+# ============================================================
+#  SECTION 9 : Alpha diversity longitudinal visualization
+# ============================================================
+
+p_shannon_spaghetti <- ggplot(
+  meta_long,
+  aes(
+    x = age_months,
+    y = shannon,
+    group = subject_id,
+    color = study_condition
+  )
+) +
+  geom_line(alpha = 0.35, linewidth = 0.6) +
+  geom_point(alpha = 0.6, size = 1.4) +
+  geom_smooth(
+    aes(group = study_condition),
+    method = "loess",
+    se = TRUE,
+    linewidth = 1.2
+  ) +
+  scale_color_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
+    labels = c("control" = "Control", "T1D" = "T1D")
+  ) +
+  labs(
+    title = "Longitudinal change in Shannon diversity",
+    subtitle = "Each thin line represents one subject",
+    x = "Age (months)",
+    y = "Shannon diversity",
+    color = "Group"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p_shannon_spaghetti)
+
+```
+
+```{r}
+
+# ============================================================
+#  SECTION 10 : Linear mixed-effects model for Shannon diversity
+# ============================================================
+
+# 기본 모델
+# shannon ~ age_months * study_condition + (1 | subject_id)
+# 해석:
+# - age_months: 시간에 따른 Shannon 변화
+# - study_condition: Control vs T1D 차이
+# - age_months:study_condition: 시간에 따른 변화 양상이 그룹별로 다른지
+# - (1 | subject_id): 개인별 baseline 차이 보정
+
+fit_shannon_lmm <- lmerTest::lmer(
+  shannon ~ age_months * study_condition + (1 | subject_id),
+  data = meta_long
+)
+
+summary(fit_shannon_lmm)
+
+# 결과를 표 형태로 정리
+shannon_lmm_result <- broom.mixed::tidy(
+  fit_shannon_lmm,
+  effects = "fixed",
+  conf.int = TRUE
+)
+
+print(shannon_lmm_result)
+
+# CSV 저장 예시
+out_dir <- "cMD_output"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+write.csv(
+  shannon_lmm_result,
+  file = file.path(out_dir, "KosticAD_2015_Shannon_LMM_results.csv"),
+  row.names = FALSE
+)
+
+```
+
+```{r}
+
+# ============================================================
+#  SECTION 11 : Model-based prediction plot
+# ============================================================
+
+pred_shannon <- ggeffects::ggpredict(
+  fit_shannon_lmm,
+  terms = c("age_months [all]", "study_condition")
+)
+
+p_shannon_model <- ggplot(
+  pred_shannon,
+  aes(x = x, y = predicted, color = group, fill = group)
+) +
+  geom_line(linewidth = 1.2) +
+  geom_ribbon(
+    aes(ymin = conf.low, ymax = conf.high),
+    alpha = 0.18,
+    color = NA
+  ) +
+  scale_color_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
+  ) +
+  scale_fill_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
+  ) +
+  labs(
+    title = "Model-based longitudinal trajectory of Shannon diversity",
+    subtitle = "Linear mixed-effects model with subject-level random intercept",
+    x = "Age (months)",
+    y = "Predicted Shannon diversity",
+    color = "Group",
+    fill = "Group"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p_shannon_model)
+
+```
+```{r}
+# ============================================================
+#  SECTION 12 : Longitudinal visualization of selected taxa
+# ============================================================
+
+# 평균 상대풍부도 기준 상위 6개 taxon 선택
+top_taxa_long <- names(top20_kostic)[1:6]
+
+taxa_long_df <- as.data.frame(t(ra_k[top_taxa_long, , drop = FALSE])) |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::left_join(meta_long, by = "sample_id") |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(top_taxa_long),
+    names_to = "taxon",
+    values_to = "relative_abundance"
+  ) |>
+  dplyr::mutate(
+    rel_abund_log10 = log10(relative_abundance + 1e-5),
+    taxon_short = stringr::str_replace(taxon, ".*s__", "s__")
+  )
+
+p_taxa_long <- ggplot(
+  taxa_long_df,
+  aes(
+    x = age_months,
+    y = rel_abund_log10,
+    group = subject_id,
+    color = study_condition
+  )
+) +
+  geom_line(alpha = 0.25, linewidth = 0.5) +
+  geom_point(alpha = 0.45, size = 1.0) +
+  geom_smooth(
+    aes(group = study_condition),
+    method = "loess",
+    se = TRUE,
+    linewidth = 1.0
+  ) +
+  facet_wrap(~ taxon_short, scales = "free_y", ncol = 3) +
+  scale_color_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
+  ) +
+  labs(
+    title = "Longitudinal trajectories of dominant taxa",
+    subtitle = "Relative abundance was log10-transformed after adding pseudo-count 1e-5",
+    x = "Age (months)",
+    y = "log10(relative abundance + 1e-5)",
+    color = "Group"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 8)
+  )
+
+print(p_taxa_long)
+```
+```{r}
+
+
+
+# ============================================================
+#  SECTION 13 : Taxon-level longitudinal mixed model
+# ============================================================
+
+run_taxon_lmm <- function(taxon_name, taxa_df) {
+  
+  dat <- taxa_df |>
+    dplyr::filter(taxon == taxon_name) |>
+    dplyr::filter(
+      !is.na(rel_abund_log10),
+      !is.na(age_months),
+      !is.na(study_condition),
+      !is.na(subject_id)
+    )
+  
+  # 모든 그룹이 존재하지 않거나 sample 수가 너무 적으면 skip
+  if (dplyr::n_distinct(dat$study_condition) < 2) {
+    return(NULL)
+  }
+  
+  fit <- tryCatch(
+    {
+      lmerTest::lmer(
+        rel_abund_log10 ~ age_months * study_condition + (1 | subject_id),
+        data = dat
+      )
+    },
+    error = function(e) NULL
+  )
+  
+  if (is.null(fit)) {
+    return(NULL)
+  }
+  
+  broom.mixed::tidy(
+    fit,
+    effects = "fixed",
+    conf.int = TRUE
+  ) |>
+    dplyr::mutate(taxon = taxon_name)
+}
+
+taxon_lmm_results <- lapply(
+  unique(taxa_long_df$taxon),
+  run_taxon_lmm,
+  taxa_df = taxa_long_df
+) |>
+  dplyr::bind_rows()
+
+# FDR 보정
+taxon_lmm_results <- taxon_lmm_results |>
+  dplyr::group_by(term) |>
+  dplyr::mutate(
+    p_adj_BH = p.adjust(p.value, method = "BH")
+  ) |>
+  dplyr::ungroup()
+
+print(taxon_lmm_results)
+
+write.csv(
+  taxon_lmm_results,
+  file = file.path(out_dir, "KosticAD_2015_TopTaxa_LMM_results.csv"),
+  row.names = FALSE
+)
+```
+```{r}
+
+# ============================================================
+#  SECTION 14 : Visualization of taxon-level LMM results
+# ============================================================
+
+# 관심 term:
+# age_months:study_conditionT1D
+# → 시간에 따른 변화 양상이 T1D군과 control군에서 다른지 평가
+
+interaction_results <- taxon_lmm_results |>
+  dplyr::filter(term == "age_months:study_conditionT1D") |>
+  dplyr::mutate(
+    taxon_short = stringr::str_replace(taxon, ".*s__", "s__"),
+    significance = dplyr::case_when(
+      p_adj_BH < 0.05 ~ "FDR < 0.05",
+      p.value < 0.05 ~ "nominal p < 0.05",
+      TRUE ~ "not significant"
+    )
+  )
+
+p_taxon_lmm <- ggplot(
+  interaction_results,
+  aes(
+    x = reorder(taxon_short, estimate),
+    y = estimate,
+    fill = significance
+  )
+) +
+  geom_col(width = 0.7) +
+  geom_errorbar(
+    aes(ymin = conf.low, ymax = conf.high),
+    width = 0.2
+  ) +
+  coord_flip() +
+  labs(
+    title = "Group-specific longitudinal change in dominant taxa",
+    subtitle = "Interaction term: age_months × T1D",
+    x = "Taxon",
+    y = "Estimated interaction coefficient",
+    fill = "Significance"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom")
+
+print(p_taxon_lmm)
+```
+```{r}
+
+
+# ============================================================
+#  SECTION 15 : Within-subject distance from baseline
+# ============================================================
+
+# sample 순서 확인
+sample_ids <- colnames(kostic_tse)
+
+meta_for_beta <- meta_long |>
+  dplyr::filter(sample_id %in% sample_ids) |>
+  dplyr::arrange(subject_id, age_months)
+
+# Bray-Curtis distance matrix
+bc_mat <- as.matrix(vegan::vegdist(t(ra_k), method = "bray"))
+
+# subject별 baseline sample 지정
+baseline_samples <- meta_for_beta |>
+  dplyr::group_by(subject_id) |>
+  dplyr::slice_min(age_months, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup() |>
+  dplyr::select(subject_id, baseline_sample_id = sample_id)
+
+meta_beta_baseline <- meta_for_beta |>
+  dplyr::left_join(baseline_samples, by = "subject_id") |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    distance_from_baseline = bc_mat[sample_id, baseline_sample_id]
+  ) |>
+  dplyr::ungroup()
+
+head(meta_beta_baseline)
+
+p_baseline_dist <- ggplot(
+  meta_beta_baseline,
+  aes(
+    x = age_months,
+    y = distance_from_baseline,
+    group = subject_id,
+    color = study_condition
+  )
+) +
+  geom_line(alpha = 0.35, linewidth = 0.6) +
+  geom_point(alpha = 0.6, size = 1.3) +
+  geom_smooth(
+    aes(group = study_condition),
+    method = "loess",
+    se = TRUE,
+    linewidth = 1.2
+  ) +
+  scale_color_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
+  ) +
+  labs(
+    title = "Within-subject microbiome change from baseline",
+    subtitle = "Bray-Curtis distance from each subject's first sample",
+    x = "Age (months)",
+    y = "Bray-Curtis distance from baseline",
+    color = "Group"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p_baseline_dist)
+```
+```{r}
+
+# ============================================================
+#  SECTION 16 : Mixed model for distance from baseline
+# ============================================================
+
+fit_baseline_dist <- lmerTest::lmer(
+  distance_from_baseline ~ age_months * study_condition + (1 | subject_id),
+  data = meta_beta_baseline
+)
+
+summary(fit_baseline_dist)
+
+baseline_dist_result <- broom.mixed::tidy(
+  fit_baseline_dist,
+  effects = "fixed",
+  conf.int = TRUE
+)
+
+print(baseline_dist_result)
+
+write.csv(
+  baseline_dist_result,
+  file = file.path(out_dir, "KosticAD_2015_BaselineDistance_LMM_results.csv"),
+  row.names = FALSE
+)
+```
+```{r}
+
+# ============================================================
+#  SECTION 17 : Age-bin based community composition
+# ============================================================
+
+meta_long_bin <- meta_long |>
+  dplyr::mutate(
+    age_bin = cut(
+      age_months,
+      breaks = c(-Inf, 3, 6, 12, 18, 24, Inf),
+      labels = c("0-3", "3-6", "6-12", "12-18", "18-24", ">24")
+    )
+  )
+
+top10_taxa <- names(top20_kostic)[1:10]
+
+composition_df <- as.data.frame(t(ra_k[top10_taxa, , drop = FALSE])) |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::left_join(
+    meta_long_bin |> dplyr::select(sample_id, subject_id, study_condition, age_bin),
+    by = "sample_id"
+  ) |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(top10_taxa),
+    names_to = "taxon",
+    values_to = "relative_abundance"
+  ) |>
+  dplyr::filter(!is.na(age_bin), !is.na(study_condition)) |>
+  dplyr::group_by(study_condition, age_bin, taxon) |>
+  dplyr::summarise(
+    mean_relative_abundance = mean(relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    taxon_short = stringr::str_replace(taxon, ".*s__", "s__")
+  )
+
+p_composition_agebin <- ggplot(
+  composition_df,
+  aes(
+    x = age_bin,
+    y = mean_relative_abundance,
+    fill = taxon_short
+  )
+) +
+  geom_col(position = "fill", width = 0.8) +
+  facet_wrap(~ study_condition, nrow = 1) +
+  labs(
+    title = "Age-bin based microbiome composition",
+    subtitle = "Top 10 taxa summarized by age interval and disease group",
+    x = "Age interval, months",
+    y = "Relative proportion among top 10 taxa",
+    fill = "Taxon"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+print(p_composition_agebin)
+```
+```{r
+
+}
+
+```
