@@ -1,6 +1,6 @@
 ---
-title: "Optimized Longitudinal Microbiome Analysis: KosticAD_2015"
-author: "Optimized script with Korean methodological comments"
+title: "Longitudinal Microbiome Analysis with Result-Based Interpretation: KosticAD_2015"
+author: "Revised script with Korean methodological comments"
 date: "2026-06-09"
 output:
   html_document:
@@ -18,48 +18,20 @@ knitr::opts_chunk$set(
 )
 ```
 
-# 0. 분석 개요
 
-이 Rmd는 `curatedMetagenomicData`의 `KosticAD_2015.relative_abundance` 자료를 이용하여 종단 마이크로바이옴 분석을 수행하는 최적화 예시임.
 
-분석은 크게 세 부분으로 나눔.
-
-1. **Alpha diversity**
-   - 한 sample 내부의 다양성 변화 평가.
-   - 예시 지표: Shannon diversity.
-   - 주 분석: `shannon ~ age_months * study_condition + (1 | subject_id)`.
-
-2. **Beta diversity**
-   - sample 간 전체 군집 조성 차이 평가.
-   - 예시 거리: Bray-Curtis distance.
-   - 주 분석: PCoA, subject-level PERMANOVA, within-subject time PERMANOVA, baseline distance LMM.
-
-3. **Taxa-level longitudinal analysis**
-   - 개별 taxon의 시간 변화 및 group-specific trajectory 평가.
-   - 주 분석: CLR-transformed abundance 기반 taxon-wise LMM.
-
-업로드된 기존 결과 기준으로는 다음과 같은 경향이 확인됨.
-
-- Shannon diversity LMM: `age_months` 효과는 유의하나, `study_conditionT1D`와 `age_months:study_conditionT1D` interaction은 유의하지 않음.
-- Baseline Bray-Curtis distance LMM: `age_months` 효과는 유의하나, group 효과와 interaction은 유의하지 않음.
-- Taxa-level CLR LMM: 일부 taxon에서 시간 효과가 관찰되지만, group-specific longitudinal interaction은 FDR 0.05 기준에서 확정 유의 결과가 없음.
-
-따라서 이 스크립트는 **질병군 차이를 과도하게 강조하지 않고**, 시간 변화와 반복측정 구조를 중심으로 결과를 정리하도록 구성함.
-
-# 1. 패키지 로드 및 출력 폴더 생성
+# 1. 패키지 확인 및 출력 폴더 생성
 
 ```{r packages}
 # ============================================================
 # 목적:
-# - 분석에 필요한 CRAN/Bioconductor 패키지를 로드함.
-# - 중간 결과물 저장 폴더를 ./Figure, ./Table로 고정함.
-#
-# 출력 규칙:
-# - 그림: ggsave()로 ./Figure에 저장함.
-# - 표: write.table()로 ./Table에 TSV 형식으로 저장함.
+# - 필요한 패키지가 설치되어 있는지 확인함.
+# - 이 스크립트에서는 library() 호출을 최소화하고, 각 함수 앞에 패키지명을 명시함.
+# - 단, %>% 파이프 사용을 위해 magrittr::`%>%`를 현재 환경에 연결함.
 # ============================================================
 
 cran_pkgs <- c(
+  "magrittr",
   "dplyr",
   "tidyr",
   "tibble",
@@ -79,33 +51,33 @@ bioc_pkgs <- c(
 )
 
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
-  install.packages("BiocManager")
+  utils::install.packages("BiocManager")
 }
 
-for (p in cran_pkgs) {
-  if (!requireNamespace(p, quietly = TRUE)) {
-    install.packages(p)
+for (pkg in cran_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    utils::install.packages(pkg)
   }
-  library(p, character.only = TRUE)
 }
 
-for (p in bioc_pkgs) {
-  if (!requireNamespace(p, quietly = TRUE)) {
-    BiocManager::install(p, ask = FALSE, update = FALSE)
+for (pkg in bioc_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
   }
-  library(p, character.only = TRUE)
 }
 
-fig_dir <- "Figure"
-tab_dir <- "Table"
+`%>%` <- magrittr::`%>%`
 
-dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
-dir.create(tab_dir, showWarnings = FALSE, recursive = TRUE)
+fig_dir <- "../Figure"
+tab_dir <- "../Table"
+
+base::dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+base::dir.create(tab_dir, showWarnings = FALSE, recursive = TRUE)
 
 save_table <- function(x, filename, row_names = FALSE) {
-  write.table(
+  utils::write.table(
     x,
-    file = file.path(tab_dir, filename),
+    file = base::file.path(tab_dir, filename),
     sep = "\t",
     quote = FALSE,
     row.names = row_names,
@@ -115,7 +87,7 @@ save_table <- function(x, filename, row_names = FALSE) {
 
 save_plot <- function(plot, filename, width = 7, height = 5, dpi = 300) {
   ggplot2::ggsave(
-    filename = file.path(fig_dir, filename),
+    filename = base::file.path(fig_dir, filename),
     plot = plot,
     width = width,
     height = height,
@@ -125,178 +97,257 @@ save_plot <- function(plot, filename, width = 7, height = 5, dpi = 300) {
 }
 
 short_taxon_name <- function(x) {
-  out <- stringr::str_replace(x, ".*s__", "s__")
-  out <- stringr::str_replace(out, ".*g__", "g__")
+  out <- base::sub(".*s__", "s__", x)
+  out <- base::sub(".*g__", "g__", out)
   out
 }
 
 adonis_to_table <- function(x) {
-  as.data.frame(x) |>
+  base::as.data.frame(x) %>%
     tibble::rownames_to_column("term")
 }
 
 sig_label <- function(p, p_adj = NULL) {
-  if (!is.null(p_adj)) {
+  if (!base::is.null(p_adj)) {
     dplyr::case_when(
-      !is.na(p_adj) & p_adj < 0.001 ~ "FDR < 0.001",
-      !is.na(p_adj) & p_adj < 0.01  ~ "FDR < 0.01",
-      !is.na(p_adj) & p_adj < 0.05  ~ "FDR < 0.05",
-      !is.na(p) & p < 0.05         ~ "nominal p < 0.05",
-      TRUE                         ~ "not significant"
+      !base::is.na(p_adj) & p_adj < 0.001 ~ "FDR < 0.001",
+      !base::is.na(p_adj) & p_adj < 0.01  ~ "FDR < 0.01",
+      !base::is.na(p_adj) & p_adj < 0.05  ~ "FDR < 0.05",
+      !base::is.na(p) & p < 0.05         ~ "nominal p < 0.05",
+      TRUE                               ~ "not significant"
     )
   } else {
     dplyr::case_when(
-      !is.na(p) & p < 0.001 ~ "p < 0.001",
-      !is.na(p) & p < 0.01  ~ "p < 0.01",
-      !is.na(p) & p < 0.05  ~ "p < 0.05",
-      TRUE                  ~ "not significant"
+      !base::is.na(p) & p < 0.001 ~ "p < 0.001",
+      !base::is.na(p) & p < 0.01  ~ "p < 0.01",
+      !base::is.na(p) & p < 0.05  ~ "p < 0.05",
+      TRUE                        ~ "not significant"
     )
   }
 }
 ```
 
-# 2. 데이터 로드 및 공통 전처리
+# 2. 데이터 로드
 
 ```{r load-data}
 # ============================================================
 # 목적:
-# - KosticAD_2015의 species-level relative abundance 자료를 불러옴.
-# - subject_id, study_condition, age를 정리하여 종단 분석용 metadata를 만듦.
-#
-# 통계적 충족 조건:
-# - subject_id가 있어야 반복측정 구조를 모델링할 수 있음.
-# - age 또는 time 변수가 있어야 종단 변화를 평가할 수 있음.
-# - study_condition은 subject-level group 변수로 사용함.
-#
-# 최적화 내용:
-# - relative abundance scale이 0-1 또는 0-100 중 어떤 형태로 들어오더라도
-#   sample별 합이 1이 되도록 정규화함.
+# - curatedMetagenomicData에서 KosticAD_2015의 relative abundance 자료를 불러옴.
+# - 이 단계에서는 아직 종단 시간축을 확정하지 않음.
+# - 다음 section에서 days_from_first_collection을 확인한 뒤 time_months를 생성함.
 # ============================================================
 
-curatedMetagenomicData("KosticAD_2015", dryrun = TRUE)
+curatedMetagenomicData::curatedMetagenomicData("KosticAD_2015", dryrun = TRUE)
 
-kostic_tse <- curatedMetagenomicData(
+kostic_tse <- curatedMetagenomicData::curatedMetagenomicData(
   "KosticAD_2015.relative_abundance",
   dryrun = FALSE,
   counts = FALSE
 )[[1]]
 
 ra_raw <- SummarizedExperiment::assay(kostic_tse, "relative_abundance")
-storage.mode(ra_raw) <- "numeric"
-ra_raw[is.na(ra_raw)] <- 0
+base::storage.mode(ra_raw) <- "numeric"
+ra_raw[base::is.na(ra_raw)] <- 0
 
-# sample별 합이 0인 경우를 제외하고 composition scale로 정규화함.
-sample_total <- colSums(ra_raw, na.rm = TRUE)
+meta_k <- base::as.data.frame(SummarizedExperiment::colData(kostic_tse))
+base::rownames(meta_k) <- base::colnames(kostic_tse)
+
+raw_data_summary <- base::data.frame(
+  n_taxa_raw = base::nrow(ra_raw),
+  n_samples_raw = base::ncol(ra_raw),
+  n_subjects_raw = dplyr::n_distinct(meta_k$subject_id),
+  has_days_from_first_collection = "days_from_first_collection" %in% base::colnames(meta_k),
+  has_age = "age" %in% base::colnames(meta_k),
+  has_infant_age = "infant_age" %in% base::colnames(meta_k)
+)
+
+save_table(raw_data_summary, "00_raw_data_summary.tsv")
+base::print(raw_data_summary)
+```
+
+# 3. 시간 변수 확인: 분석 전 필수 진단
+
+```{r time-variable-check}
+# ============================================================
+# 목적:
+# - 기존 age 변수는 0–3 범위의 coarse variable일 가능성이 높음.
+# - 실제 종단 방문 시점은 days_from_first_collection으로 확인함.
+# - 분석 시간축은 time_months = days_from_first_collection / 30.4375로 정의함.
+#
+# 확인 기준:
+# - days_from_first_collection이 존재해야 함.
+# - numeric 변환 후 결측이 너무 많으면 분석 전에 원자료 확인이 필요함.
+# - subject별로 time_months가 2개 이상 존재해야 종단 분석이 가능함.
+# ============================================================
+
+if (!"days_from_first_collection" %in% base::colnames(meta_k)) {
+  base::stop("days_from_first_collection column is not available. Please check metadata before running longitudinal analysis.")
+}
+
+time_check <- meta_k %>%
+  tibble::rownames_to_column("sample_id") %>%
+  dplyr::mutate(
+    subject_id = base::as.factor(.data$subject_id),
+    study_condition = base::factor(.data$study_condition, levels = c("control", "T1D")),
+    age_raw = base::suppressWarnings(base::as.numeric(.data$age)),
+    infant_age_raw = base::suppressWarnings(base::as.numeric(.data$infant_age)),
+    days_from_first_collection = base::suppressWarnings(base::as.numeric(.data$days_from_first_collection)),
+    time_months = .data$days_from_first_collection / 30.4375,
+    time_years = .data$time_months / 12
+  ) %>%
+  dplyr::arrange(.data$subject_id, .data$time_months, .data$sample_id)
+
+time_variable_summary <- time_check %>%
+  dplyr::summarise(
+    n_samples = dplyr::n(),
+    n_subjects = dplyr::n_distinct(.data$subject_id),
+    n_missing_days_from_first_collection = base::sum(base::is.na(.data$days_from_first_collection)),
+    n_unique_age_raw = dplyr::n_distinct(.data$age_raw, na.rm = TRUE),
+    min_age_raw = base::min(.data$age_raw, na.rm = TRUE),
+    max_age_raw = base::max(.data$age_raw, na.rm = TRUE),
+    n_unique_time_months = dplyr::n_distinct(.data$time_months, na.rm = TRUE),
+    min_time_months = base::min(.data$time_months, na.rm = TRUE),
+    max_time_months = base::max(.data$time_months, na.rm = TRUE),
+    min_time_years = base::min(.data$time_years, na.rm = TRUE),
+    max_time_years = base::max(.data$time_years, na.rm = TRUE)
+  )
+
+subject_time_summary <- time_check %>%
+  dplyr::filter(!base::is.na(.data$subject_id), !base::is.na(.data$time_months)) %>%
+  dplyr::group_by(.data$subject_id, .data$study_condition) %>%
+  dplyr::summarise(
+    n_timepoints = dplyr::n(),
+    n_unique_time_months = dplyr::n_distinct(.data$time_months),
+    min_time_months = base::min(.data$time_months, na.rm = TRUE),
+    max_time_months = base::max(.data$time_months, na.rm = TRUE),
+    followup_months = .data$max_time_months - .data$min_time_months,
+    .groups = "drop"
+  )
+
+save_table(time_check, "00_time_variable_check.tsv")
+save_table(time_variable_summary, "00_time_variable_summary.tsv")
+save_table(subject_time_summary, "00_subject_time_summary.tsv")
+
+base::print(time_variable_summary)
+base::print(subject_time_summary)
+
+if (base::all(base::is.na(time_check$time_months))) {
+  base::stop("time_months is all NA. Check days_from_first_collection before running analysis.")
+}
+
+if (base::sum(!base::is.na(time_check$time_months)) < 3) {
+  base::stop("Too few non-missing time_months values for longitudinal analysis.")
+}
+
+p_sampling_timeline <- time_check %>%
+  dplyr::filter(!base::is.na(.data$time_months), !base::is.na(.data$study_condition)) %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$time_months,
+      y = .data$subject_id,
+      color = .data$study_condition
+    )
+  ) +
+  ggplot2::geom_point(size = 2.0, alpha = 0.85) +
+  ggplot2::geom_line(ggplot2::aes(group = .data$subject_id), alpha = 0.35) +
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
+    title = "Sampling timeline by subject",
+    subtitle = "time_months was calculated from days_from_first_collection",
+    x = "Time from first collection (months)",
+    y = "Subject ID",
+    color = "Group"
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
+
+base::print(p_sampling_timeline)
+save_plot(p_sampling_timeline, "00_sampling_timeline_by_subject.png", width = 8, height = 6)
+```
+
+# 4. 공통 전처리
+
+```{r common-preprocessing}
+# ============================================================
+# 목적:
+# - sample별 relative abundance 합이 1이 되도록 정규화함.
+# - metadata와 abundance matrix의 sample 순서를 일치시킴.
+# - 분석 시간축은 time_months로 고정함.
+# ============================================================
+
+sample_total <- base::colSums(ra_raw, na.rm = TRUE)
 keep_nonzero_sample <- sample_total > 0
 
 ra_raw <- ra_raw[, keep_nonzero_sample, drop = FALSE]
 sample_total <- sample_total[keep_nonzero_sample]
 
-ra_prop <- sweep(ra_raw, 2, sample_total, FUN = "/")
-ra_prop[is.na(ra_prop)] <- 0
+ra_prop <- base::sweep(ra_raw, 2, sample_total, FUN = "/")
+ra_prop[base::is.na(ra_prop)] <- 0
 
-meta_k <- as.data.frame(SummarizedExperiment::colData(kostic_tse))
-rownames(meta_k) <- colnames(kostic_tse)
-
-meta_long <- meta_k |>
-  tibble::rownames_to_column("sample_id") |>
-  dplyr::filter(sample_id %in% colnames(ra_prop)) |>
-  dplyr::mutate(
-    subject_id = as.factor(subject_id),
-    study_condition = factor(study_condition, levels = c("control", "T1D")),
-    age_months = as.numeric(age)
-  ) |>
+meta_long <- time_check %>%
+  dplyr::filter(.data$sample_id %in% base::colnames(ra_prop)) %>%
   dplyr::filter(
-    !is.na(subject_id),
-    !is.na(study_condition),
-    !is.na(age_months)
-  ) |>
-  dplyr::arrange(subject_id, age_months, sample_id)
+    !base::is.na(.data$subject_id),
+    !base::is.na(.data$study_condition),
+    !base::is.na(.data$time_months)
+  ) %>%
+  dplyr::arrange(.data$subject_id, .data$time_months, .data$sample_id)
 
-# metadata와 abundance matrix의 sample 순서를 동일하게 맞춤.
 ra_prop <- ra_prop[, meta_long$sample_id, drop = FALSE]
+base::stopifnot(base::identical(base::colnames(ra_prop), meta_long$sample_id))
 
-stopifnot(identical(colnames(ra_prop), meta_long$sample_id))
-
-subject_summary <- meta_long |>
-  dplyr::group_by(subject_id, study_condition) |>
-  dplyr::summarise(
-    n_timepoints = dplyr::n(),
-    min_age_months = min(age_months, na.rm = TRUE),
-    max_age_months = max(age_months, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-data_summary <- data.frame(
-  n_taxa = nrow(ra_prop),
-  n_samples = ncol(ra_prop),
+analysis_data_summary <- base::data.frame(
+  n_taxa = base::nrow(ra_prop),
+  n_samples = base::ncol(ra_prop),
   n_subjects = dplyr::n_distinct(meta_long$subject_id),
-  n_control_samples = sum(meta_long$study_condition == "control"),
-  n_T1D_samples = sum(meta_long$study_condition == "T1D")
+  n_control_samples = base::sum(meta_long$study_condition == "control"),
+  n_T1D_samples = base::sum(meta_long$study_condition == "T1D"),
+  min_time_months = base::min(meta_long$time_months, na.rm = TRUE),
+  max_time_months = base::max(meta_long$time_months, na.rm = TRUE)
 )
 
-save_table(data_summary, "00_data_summary.tsv")
-save_table(subject_summary, "00_subject_summary.tsv")
-
-print(data_summary)
-print(subject_summary)
-
-p_timepoints <- ggplot(subject_summary, aes(x = n_timepoints)) +
-  geom_histogram(binwidth = 1, color = "black", fill = "grey85") +
-  labs(
-    title = "Number of repeated samples per subject",
-    x = "Number of time points",
-    y = "Number of subjects"
-  ) +
-  theme_bw(base_size = 12)
-
-print(p_timepoints)
-save_plot(p_timepoints, "00_subject_timepoints_histogram.png", width = 6, height = 4)
+save_table(analysis_data_summary, "00_analysis_data_summary.tsv")
+base::print(analysis_data_summary)
 ```
 
-# 3. Taxonomy 및 분석 대상 taxa 요약
+# 5. Taxa 요약 및 분석 대상 선정
 
 ```{r taxonomy-summary}
 # ============================================================
 # 목적:
-# - 각 taxon의 평균 상대풍부도와 prevalence를 계산함.
+# - taxon별 평균 상대풍부도와 prevalence를 계산함.
 # - taxa-level LMM에 사용할 후보 taxon을 선정함.
 #
-# 충족 조건:
-# - zero가 너무 많은 taxon은 LMM 추정이 불안정하므로 prevalence filter를 적용함.
+# 조건:
+# - prevalence가 낮은 taxon은 zero가 많아 모델이 불안정할 수 있음.
 # - 여기서는 prevalence >= 10%인 taxa 중 평균 상대풍부도 상위 12개를 사용함.
 # ============================================================
 
-taxa_summary <- data.frame(
-  taxon = rownames(ra_prop),
-  mean_abundance = rowMeans(ra_prop, na.rm = TRUE),
-  prevalence = rowMeans(ra_prop > 0, na.rm = TRUE)
-) |>
-  dplyr::mutate(
-    taxon_short = short_taxon_name(taxon)
-  ) |>
-  dplyr::arrange(dplyr::desc(mean_abundance))
+taxa_summary <- base::data.frame(
+  taxon = base::rownames(ra_prop),
+  mean_abundance = base::rowMeans(ra_prop, na.rm = TRUE),
+  prevalence = base::rowMeans(ra_prop > 0, na.rm = TRUE)
+) %>%
+  dplyr::mutate(taxon_short = short_taxon_name(.data$taxon)) %>%
+  dplyr::arrange(dplyr::desc(.data$mean_abundance))
 
-selected_taxa <- taxa_summary |>
-  dplyr::filter(prevalence >= 0.10) |>
-  dplyr::slice_head(n = 12) |>
+selected_taxa <- taxa_summary %>%
+  dplyr::filter(.data$prevalence >= 0.10) %>%
+  dplyr::slice_head(n = 12) %>%
   dplyr::pull(taxon)
 
-selected_taxa_table <- taxa_summary |>
-  dplyr::filter(taxon %in% selected_taxa) |>
-  dplyr::mutate(
-    selected_for_taxa_LMM = TRUE
-  )
+selected_taxa_table <- taxa_summary %>%
+  dplyr::filter(.data$taxon %in% selected_taxa) %>%
+  dplyr::mutate(selected_for_taxa_LMM = TRUE)
 
 save_table(taxa_summary, "00_taxa_summary_all.tsv")
 save_table(selected_taxa_table, "00_taxa_selected_for_LMM.tsv")
-
-print(selected_taxa_table)
+base::print(selected_taxa_table)
 ```
 
-# 4. Alpha diversity 분석
+# 6. Alpha diversity 분석
 
-## 4-1. 분석 목적과 가정
+## 6-1. 분석 목적과 가정
 
 ```{r alpha-method-comment, eval=FALSE}
 # ============================================================
@@ -305,19 +356,19 @@ print(selected_taxa_table)
 # - 여기서는 Shannon diversity를 사용함.
 #
 # 분석 목적:
-# - 시간이 지남에 따라 Shannon diversity가 변하는지 평가함.
+# - time_months에 따라 Shannon diversity가 변하는지 평가함.
 # - T1D군과 대조군의 평균 수준 또는 시간 변화율이 다른지 평가함.
 #
 # 통계 방법:
 # - Linear mixed-effects model (LMM)
-# - 모델: shannon ~ age_months * study_condition + (1 | subject_id)
+# - 모델: shannon ~ time_months * study_condition + (1 | subject_id)
 #
 # 항목 해석:
-# - age_months:
+# - time_months:
 #   대조군 기준 시간에 따른 Shannon 변화율.
 # - study_conditionT1D:
-#   기준 시간점에서 T1D군과 대조군의 차이.
-# - age_months:study_conditionT1D:
+#   time_months = 0 지점에서 T1D군과 대조군의 차이.
+# - time_months:study_conditionT1D:
 #   T1D군의 시간 변화율이 대조군과 다른지 평가하는 interaction.
 # - (1 | subject_id):
 #   같은 subject에서 반복 측정된 sample 간 상관을 보정함.
@@ -332,68 +383,70 @@ print(selected_taxa_table)
 #
 # 조성성:
 # - Shannon은 relative abundance에서 계산되므로 조성자료의 영향을 완전히 제거하지는 못함.
-# - 다만 개별 taxon abundance 분석보다는 조성성 문제가 덜 직접적임.
+# - 개별 taxon abundance 분석보다는 조성성 문제가 덜 직접적임.
 # ============================================================
 ```
 
-## 4-2. Shannon diversity 계산 및 시각화
+## 6-2. Shannon diversity 계산 및 시각화
 
 ```{r alpha-plot}
-shannon_k <- vegan::diversity(t(ra_prop), index = "shannon")
+shannon_k <- vegan::diversity(base::t(ra_prop), index = "shannon")
 
-meta_long <- meta_long |>
-  dplyr::mutate(shannon = shannon_k[sample_id]) |>
-  dplyr::filter(!is.na(shannon))
+meta_long <- meta_long %>%
+  dplyr::mutate(shannon = shannon_k[.data$sample_id]) %>%
+  dplyr::filter(!base::is.na(.data$shannon))
 
-alpha_summary <- meta_long |>
-  dplyr::group_by(study_condition) |>
+alpha_summary <- meta_long %>%
+  dplyr::group_by(.data$study_condition) %>%
   dplyr::summarise(
-    mean_shannon = mean(shannon, na.rm = TRUE),
-    sd_shannon = sd(shannon, na.rm = TRUE),
-    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = base::mean(.data$shannon, na.rm = TRUE),
+    sd_shannon = stats::sd(.data$shannon, na.rm = TRUE),
+    median_shannon = stats::median(.data$shannon, na.rm = TRUE),
     n_samples = dplyr::n(),
-    n_subjects = dplyr::n_distinct(subject_id),
+    n_subjects = dplyr::n_distinct(.data$subject_id),
     .groups = "drop"
   )
 
 save_table(alpha_summary, "01_alpha_Shannon_summary.tsv")
-print(alpha_summary)
+base::print(alpha_summary)
 
-p_alpha_spaghetti <- ggplot(
-  meta_long,
-  aes(x = age_months, y = shannon, group = subject_id, color = study_condition)
-) +
-  geom_line(alpha = 0.35, linewidth = 0.5) +
-  geom_point(alpha = 0.65, size = 1.4) +
-  geom_smooth(
-    aes(group = study_condition),
+p_alpha_spaghetti <- meta_long %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$time_months,
+      y = .data$shannon,
+      group = .data$subject_id,
+      color = .data$study_condition
+    )
+  ) +
+  ggplot2::geom_line(alpha = 0.35, linewidth = 0.5) +
+  ggplot2::geom_point(alpha = 0.65, size = 1.4) +
+  ggplot2::geom_smooth(
+    ggplot2::aes(group = .data$study_condition),
     method = "lm",
     se = TRUE,
     linewidth = 1.1
   ) +
-  scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
-    labels = c("control" = "Control", "T1D" = "T1D")
-  ) +
-  labs(
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
     title = "Alpha diversity trajectory",
     subtitle = "Shannon diversity over time; each thin line represents one subject",
-    x = "Age / time variable",
+    x = "Time from first collection (months)",
     y = "Shannon diversity",
     color = "Group"
   ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom")
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
 
-print(p_alpha_spaghetti)
-save_plot(p_alpha_spaghetti, "01_alpha_Shannon_spaghetti.png", width = 7, height = 5)
+base::print(p_alpha_spaghetti)
+save_plot(p_alpha_spaghetti, "01_alpha_Shannon_spaghetti_time_months.png", width = 7, height = 5)
 ```
 
-## 4-3. Shannon diversity LMM
+## 6-3. Shannon diversity LMM
 
 ```{r alpha-lmm}
 fit_shannon_lmm <- lmerTest::lmer(
-  shannon ~ age_months * study_condition + (1 | subject_id),
+  shannon ~ time_months * study_condition + (1 | subject_id),
   data = meta_long,
   REML = TRUE
 )
@@ -402,94 +455,144 @@ shannon_lmm_result <- broom.mixed::tidy(
   fit_shannon_lmm,
   effects = "fixed",
   conf.int = TRUE
-) |>
-  dplyr::mutate(
-    significance = sig_label(p.value)
-  )
+) %>%
+  dplyr::mutate(significance = sig_label(.data$p.value))
 
-save_table(shannon_lmm_result, "01_alpha_Shannon_LMM_results.tsv")
-print(shannon_lmm_result)
+save_table(shannon_lmm_result, "01_alpha_Shannon_LMM_results_time_months.tsv")
+base::print(shannon_lmm_result)
 
-# 결과 기반 해석용 요약:
-# - 기존 결과에서는 age_months가 유의했고,
-#   study_condition 및 age_months:study_conditionT1D는 유의하지 않았음.
-alpha_key_terms <- shannon_lmm_result |>
-  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
+alpha_key_terms <- shannon_lmm_result %>%
+  dplyr::filter(.data$term %in% c("time_months", "study_conditionT1D", "time_months:study_conditionT1D")) %>%
   dplyr::select(term, estimate, conf.low, conf.high, p.value, significance)
 
-save_table(alpha_key_terms, "01_alpha_Shannon_key_terms.tsv")
+save_table(alpha_key_terms, "01_alpha_Shannon_key_terms_time_months.tsv")
 ```
 
-## 4-4. Alpha LMM 예측선 및 진단 그림
+## 6-4. Alpha LMM 예측선 및 진단 그림
 
 ```{r alpha-model-prediction}
 pred_shannon <- ggeffects::ggpredict(
   fit_shannon_lmm,
-  terms = c("age_months [all]", "study_condition")
+  terms = c("time_months [all]", "study_condition")
 )
 
-pred_shannon_df <- as.data.frame(pred_shannon)
-save_table(pred_shannon_df, "01_alpha_Shannon_model_prediction.tsv")
+pred_shannon_df <- base::as.data.frame(pred_shannon)
+save_table(pred_shannon_df, "01_alpha_Shannon_model_prediction_time_months.tsv")
 
-p_alpha_model <- ggplot(
-  pred_shannon_df,
-  aes(x = x, y = predicted, color = group, fill = group)
-) +
-  geom_line(linewidth = 1.2) +
-  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.18, color = NA) +
-  scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
-  scale_fill_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
-  labs(
+p_alpha_model <- pred_shannon_df %>%
+  ggplot2::ggplot(ggplot2::aes(x = .data$x, y = .data$predicted, color = .data$group, fill = .data$group)) +
+  ggplot2::geom_line(linewidth = 1.2) +
+  ggplot2::geom_ribbon(ggplot2::aes(ymin = .data$conf.low, ymax = .data$conf.high), alpha = 0.18, color = NA) +
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::scale_fill_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
     title = "Model-based alpha diversity trajectory",
     subtitle = "Predicted Shannon diversity from linear mixed-effects model",
-    x = "Age / time variable",
+    x = "Time from first collection (months)",
     y = "Predicted Shannon diversity",
     color = "Group",
     fill = "Group"
   ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom")
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
 
-print(p_alpha_model)
-save_plot(p_alpha_model, "01_alpha_Shannon_model_prediction.png", width = 7, height = 5)
+base::print(p_alpha_model)
+save_plot(p_alpha_model, "01_alpha_Shannon_model_prediction_time_months.png", width = 7, height = 5)
 
-alpha_diag_df <- data.frame(
-  fitted = fitted(fit_shannon_lmm),
-  residual = resid(fit_shannon_lmm)
+alpha_diag_df <- base::data.frame(
+  fitted = stats::fitted(fit_shannon_lmm),
+  residual = stats::resid(fit_shannon_lmm)
 )
 
-save_table(alpha_diag_df, "01_alpha_Shannon_LMM_diagnostics_values.tsv")
+save_table(alpha_diag_df, "01_alpha_Shannon_LMM_diagnostics_values_time_months.tsv")
 
-p_alpha_resid <- ggplot(alpha_diag_df, aes(x = fitted, y = residual)) +
-  geom_point(alpha = 0.7) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  labs(
+p_alpha_resid <- alpha_diag_df %>%
+  ggplot2::ggplot(ggplot2::aes(x = .data$fitted, y = .data$residual)) +
+  ggplot2::geom_point(alpha = 0.7) +
+  ggplot2::geom_hline(yintercept = 0, linetype = 2) +
+  ggplot2::labs(
     title = "Alpha LMM diagnostic: residuals vs fitted",
     x = "Fitted values",
     y = "Residuals"
   ) +
-  theme_bw(base_size = 12)
+  ggplot2::theme_bw(base_size = 12)
 
-p_alpha_qq <- ggplot(alpha_diag_df, aes(sample = residual)) +
-  stat_qq(alpha = 0.7) +
-  stat_qq_line() +
-  labs(
+p_alpha_qq <- alpha_diag_df %>%
+  ggplot2::ggplot(ggplot2::aes(sample = .data$residual)) +
+  ggplot2::stat_qq(alpha = 0.7) +
+  ggplot2::stat_qq_line() +
+  ggplot2::labs(
     title = "Alpha LMM diagnostic: QQ plot",
     x = "Theoretical quantiles",
     y = "Sample quantiles"
   ) +
-  theme_bw(base_size = 12)
+  ggplot2::theme_bw(base_size = 12)
 
-print(p_alpha_resid)
-print(p_alpha_qq)
-
-save_plot(p_alpha_resid, "01_alpha_Shannon_LMM_residuals_vs_fitted.png", width = 6, height = 4)
-save_plot(p_alpha_qq, "01_alpha_Shannon_LMM_QQplot.png", width = 6, height = 4)
+base::print(p_alpha_resid)
+base::print(p_alpha_qq)
+save_plot(p_alpha_resid, "01_alpha_Shannon_LMM_residuals_vs_fitted_time_months.png", width = 6, height = 4)
+save_plot(p_alpha_qq, "01_alpha_Shannon_LMM_QQplot_time_months.png", width = 6, height = 4)
 ```
 
-# 5. Beta diversity 분석
+## 6-5. 추가 시각화: Shannon 변화량
 
-## 5-1. 분석 목적과 가정
+```{r alpha-delta-plot}
+# ============================================================
+# 목적:
+# - 인접 방문 간 Shannon 변화량을 계산함.
+# - 단순 trajectory보다 어느 시점에서 변화가 큰지 확인하는 데 유용함.
+#
+# 해석:
+# - delta_shannon > 0: 이전 방문 대비 alpha diversity 증가.
+# - delta_shannon < 0: 이전 방문 대비 alpha diversity 감소.
+# - delta_shannon_per_month는 방문 간격 차이를 보정한 변화율임.
+# ============================================================
+
+alpha_delta_df <- meta_long %>%
+  dplyr::arrange(.data$subject_id, .data$time_months, .data$sample_id) %>%
+  dplyr::group_by(.data$subject_id) %>%
+  dplyr::mutate(
+    previous_time_months = dplyr::lag(.data$time_months),
+    previous_shannon = dplyr::lag(.data$shannon),
+    delta_time_months = .data$time_months - .data$previous_time_months,
+    delta_shannon = .data$shannon - .data$previous_shannon,
+    delta_shannon_per_month = .data$delta_shannon / .data$delta_time_months,
+    interval_midpoint_months = (.data$time_months + .data$previous_time_months) / 2
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(!base::is.na(.data$delta_shannon), .data$delta_time_months > 0)
+
+save_table(alpha_delta_df, "01_alpha_Shannon_delta_between_visits.tsv")
+
+p_alpha_delta <- alpha_delta_df %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$interval_midpoint_months,
+      y = .data$delta_shannon_per_month,
+      color = .data$study_condition
+    )
+  ) +
+  ggplot2::geom_hline(yintercept = 0, linetype = 2) +
+  ggplot2::geom_point(alpha = 0.7, size = 1.5) +
+  ggplot2::geom_smooth(method = "lm", se = TRUE, linewidth = 1.0) +
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
+    title = "Visit-to-visit change in Shannon diversity",
+    subtitle = "Change rate was normalized by the interval between visits",
+    x = "Interval midpoint (months from first collection)",
+    y = "Delta Shannon per month",
+    color = "Group"
+  ) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
+
+base::print(p_alpha_delta)
+save_plot(p_alpha_delta, "01_alpha_Shannon_delta_per_month.png", width = 7, height = 5)
+```
+
+# 7. Beta diversity 분석
+
+## 7-1. 분석 목적과 가정
 
 ```{r beta-method-comment, eval=FALSE}
 # ============================================================
@@ -497,33 +600,37 @@ save_plot(p_alpha_qq, "01_alpha_Shannon_LMM_QQplot.png", width = 6, height = 4)
 # - sample 간 미생물 군집 조성 차이를 거리 또는 비유사도로 요약한 값임.
 #
 # 분석 목적:
-# - T1D군과 대조군의 전체 community composition 차이를 평가함.
-# - 같은 subject 안에서 시간이 지나며 microbiome이 baseline에서 얼마나 이동하는지 평가함.
+# - 전체 community composition이 time_months에 따라 이동하는지 시각화함.
+# - 각 subject에서 baseline microbiome과의 거리가 시간에 따라 커지는지 평가함.
 #
 # 주요 방법:
 # 1. Bray-Curtis PCoA:
 #    - 전체 sample 간 거리 구조를 2차원으로 시각화함.
-#    - 탐색적 시각화이며, 자체가 통계검정은 아님.
+#    - 통계검정이 아니라 탐색적 시각화임.
 #
-# 2. Subject-level PERMANOVA:
+# 2. Dynamic PCoA trajectory:
+#    - 같은 subject의 sample을 time_months 순서로 연결하고 화살표를 추가함.
+#    - community composition의 방향성 변화를 직관적으로 보여줌.
+#
+# 3. Subject-level PERMANOVA:
 #    - subject별 평균 community profile을 만든 뒤 group 차이를 평가함.
-#    - group은 subject-level 변수이므로 sample을 모두 독립으로 놓지 않기 위함.
+#    - sample-level pseudoreplication을 줄이기 위함.
 #
-# 3. Within-subject time PERMANOVA:
-#    - age_months가 community composition에 미치는 효과를 평가함.
-#    - permutation을 subject_id 안에서 제한하여 반복측정 구조를 일부 반영함.
+# 4. Within-subject time PERMANOVA:
+#    - time_months가 community composition에 미치는 영향을 평가함.
+#    - permutation은 subject_id 안에서 제한함.
 #
-# 4. Baseline distance LMM:
-#    - 각 subject의 첫 sample을 baseline으로 정함.
-#    - 이후 sample의 Bray-Curtis distance from baseline을 outcome으로 사용함.
+# 5. Baseline distance LMM:
+#    - 각 subject의 첫 sample을 baseline으로 정하고, 이후 sample과 baseline 사이 Bray-Curtis distance를 계산함.
+#    - 모델: distance_from_baseline ~ time_from_baseline_months * study_condition + (1 | subject_id)
 #
 # 독립성:
 # - 전체 sample을 독립으로 간주하는 단순 PERMANOVA는 종단자료에서 부적절할 수 있음.
-# - subject-level 평균 또는 subject-level random effect를 사용해야 함.
+# - subject-level 평균, restricted permutation, subject-level random effect를 사용해야 함.
 #
 # 분산 동질성:
 # - PERMANOVA는 group centroid 차이와 dispersion 차이를 혼동할 수 있음.
-# - betadisper로 dispersion 차이를 점검해야 함.
+# - betadisper로 dispersion 차이를 점검함.
 #
 # 조성성:
 # - Bray-Curtis는 상대풍부도 기반 거리로 널리 사용되지만 조성자료 문제를 완전히 해결하지 않음.
@@ -531,49 +638,120 @@ save_plot(p_alpha_qq, "01_alpha_Shannon_LMM_QQplot.png", width = 6, height = 4)
 # ============================================================
 ```
 
-## 5-2. Bray-Curtis PCoA
+## 7-2. Bray-Curtis PCoA: group 및 time 시각화
 
 ```{r beta-pcoa}
-bc_k <- vegan::vegdist(t(ra_prop), method = "bray")
-bc_k_mat <- as.matrix(bc_k)
+bc_k <- vegan::vegdist(base::t(ra_prop), method = "bray")
+bc_k_mat <- base::as.matrix(bc_k)
 
-pcoa_k <- cmdscale(bc_k, k = 2, eig = TRUE)
-var_k <- round(pcoa_k$eig[1:2] / sum(pcoa_k$eig[pcoa_k$eig > 0]) * 100, 1)
+pcoa_k <- stats::cmdscale(bc_k, k = 2, eig = TRUE)
+var_k <- base::round(pcoa_k$eig[1:2] / base::sum(pcoa_k$eig[pcoa_k$eig > 0]) * 100, 1)
 
-pcoa_df <- data.frame(
-  sample_id = rownames(pcoa_k$points),
+pcoa_df <- base::data.frame(
+  sample_id = base::rownames(pcoa_k$points),
   PC1 = pcoa_k$points[, 1],
   PC2 = pcoa_k$points[, 2]
-) |>
+) %>%
   dplyr::left_join(
-    meta_long |> dplyr::select(sample_id, subject_id, study_condition, age_months),
+    meta_long %>%
+      dplyr::select(sample_id, subject_id, study_condition, time_months, time_years),
     by = "sample_id"
-  )
+  ) %>%
+  dplyr::arrange(.data$subject_id, .data$time_months, .data$sample_id)
 
-save_table(pcoa_df, "02_beta_BrayCurtis_PCoA_coordinates.tsv")
+save_table(pcoa_df, "02_beta_BrayCurtis_PCoA_coordinates_time_months.tsv")
 
-p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = study_condition)) +
-  geom_point(alpha = 0.7, size = 1.8) +
-  stat_ellipse(linewidth = 0.8, type = "t") +
-  scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
-    labels = c("control" = "Control", "T1D" = "T1D")
-  ) +
-  labs(
-    title = "Beta diversity: Bray-Curtis PCoA",
+p_pcoa_group <- pcoa_df %>%
+  ggplot2::ggplot(ggplot2::aes(x = .data$PC1, y = .data$PC2, color = .data$study_condition)) +
+  ggplot2::geom_point(alpha = 0.7, size = 1.8) +
+  ggplot2::stat_ellipse(linewidth = 0.8, type = "t") +
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
+    title = "Beta diversity: Bray-Curtis PCoA by group",
     subtitle = "Exploratory visualization of sample-level community differences",
-    x = paste0("PC1 (", var_k[1], "%)"),
-    y = paste0("PC2 (", var_k[2], "%)"),
+    x = base::paste0("PC1 (", var_k[1], "%)"),
+    y = base::paste0("PC2 (", var_k[2], "%)"),
     color = "Group"
   ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom")
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
 
-print(p_pcoa)
-save_plot(p_pcoa, "02_beta_BrayCurtis_PCoA.png", width = 6.5, height = 5)
+base::print(p_pcoa_group)
+save_plot(p_pcoa_group, "02_beta_BrayCurtis_PCoA_by_group.png", width = 6.5, height = 5)
+
+p_pcoa_time <- pcoa_df %>%
+  ggplot2::ggplot(ggplot2::aes(x = .data$PC1, y = .data$PC2, color = .data$time_months)) +
+  ggplot2::geom_point(alpha = 0.85, size = 1.9) +
+  ggplot2::facet_wrap(~ study_condition) +
+  ggplot2::scale_color_viridis_c(option = "viridis") +
+  ggplot2::labs(
+    title = "Beta diversity: Bray-Curtis PCoA by time",
+    subtitle = "Each point is colored by time_months",
+    x = base::paste0("PC1 (", var_k[1], "%)"),
+    y = base::paste0("PC2 (", var_k[2], "%)"),
+    color = "Time (months)"
+  ) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
+
+base::print(p_pcoa_time)
+save_plot(p_pcoa_time, "02_beta_BrayCurtis_PCoA_by_time_months.png", width = 7.5, height = 5)
 ```
 
-## 5-3. Subject-level PERMANOVA 및 dispersion 점검
+## 7-3. Dynamic PCoA trajectory: 시간 방향 화살표
+
+```{r beta-pcoa-dynamic-arrows}
+# ============================================================
+# 목적:
+# - 같은 subject의 sample을 time_months 순서로 연결함.
+# - 화살표는 이전 방문에서 다음 방문으로의 community 이동 방향을 나타냄.
+# - point의 fill은 time_years로 표시하여 장기 시간 흐름을 직관적으로 보여줌.
+# ============================================================
+
+pcoa_arrow_df <- pcoa_df %>%
+  dplyr::filter(!base::is.na(.data$subject_id), !base::is.na(.data$time_months)) %>%
+  dplyr::group_by(.data$subject_id) %>%
+  dplyr::filter(dplyr::n() >= 2) %>%
+  dplyr::arrange(.data$time_months, .data$sample_id, .by_group = TRUE) %>%
+  dplyr::ungroup()
+
+save_table(pcoa_arrow_df, "02_beta_BrayCurtis_PCoA_arrow_coordinates.tsv")
+
+p_pcoa_arrows <- pcoa_arrow_df %>%
+  ggplot2::ggplot(ggplot2::aes(x = .data$PC1, y = .data$PC2)) +
+  ggplot2::geom_path(
+    ggplot2::aes(group = .data$subject_id, color = .data$study_condition),
+    linewidth = 0.45,
+    alpha = 0.55,
+    arrow = grid::arrow(type = "closed", length = grid::unit(0.08, "inches"))
+  ) +
+  ggplot2::geom_point(
+    ggplot2::aes(fill = .data$time_years),
+    shape = 21,
+    color = "black",
+    alpha = 0.85,
+    size = 2.0,
+    stroke = 0.25
+  ) +
+  ggplot2::facet_wrap(~ study_condition) +
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::scale_fill_viridis_c(option = "plasma") +
+  ggplot2::labs(
+    title = "Dynamic PCoA trajectory over time",
+    subtitle = "Arrows indicate sequential movement from earlier to later samples within each subject",
+    x = base::paste0("PC1 (", var_k[1], "%)"),
+    y = base::paste0("PC2 (", var_k[2], "%)"),
+    color = "Group",
+    fill = "Time (years)"
+  ) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
+
+base::print(p_pcoa_arrows)
+save_plot(p_pcoa_arrows, "02_beta_BrayCurtis_dynamic_PCoA_arrows_by_time_years.png", width = 8, height = 5.5)
+```
+
+## 7-4. Subject-level PERMANOVA 및 dispersion 점검
 
 ```{r beta-subject-permanova}
 # ============================================================
@@ -582,31 +760,31 @@ save_plot(p_pcoa, "02_beta_BrayCurtis_PCoA.png", width = 6.5, height = 5)
 # - 이 접근은 sample-level pseudoreplication을 줄이는 데 목적이 있음.
 # ============================================================
 
-ra_sample_df <- as.data.frame(t(ra_prop)) |>
-  tibble::rownames_to_column("sample_id") |>
+ra_sample_df <- base::as.data.frame(base::t(ra_prop)) %>%
+  tibble::rownames_to_column("sample_id") %>%
   dplyr::left_join(
-    meta_long |> dplyr::select(sample_id, subject_id, study_condition),
+    meta_long %>% dplyr::select(sample_id, subject_id, study_condition),
     by = "sample_id"
   )
 
-subject_profile_df <- ra_sample_df |>
-  dplyr::group_by(subject_id, study_condition) |>
+subject_profile_df <- ra_sample_df %>%
+  dplyr::group_by(.data$subject_id, .data$study_condition) %>%
   dplyr::summarise(
     dplyr::across(
-      .cols = dplyr::all_of(rownames(ra_prop)),
-      .fns = ~ mean(.x, na.rm = TRUE)
+      .cols = dplyr::all_of(base::rownames(ra_prop)),
+      .fns = ~ base::mean(.x, na.rm = TRUE)
     ),
     .groups = "drop"
   )
 
-subject_meta <- subject_profile_df |>
+subject_meta <- subject_profile_df %>%
   dplyr::select(subject_id, study_condition)
 
-subject_mat <- subject_profile_df |>
-  dplyr::select(-subject_id, -study_condition) |>
-  as.matrix()
+subject_mat <- subject_profile_df %>%
+  dplyr::select(-subject_id, -study_condition) %>%
+  base::as.matrix()
 
-rownames(subject_mat) <- subject_profile_df$subject_id
+base::rownames(subject_mat) <- subject_profile_df$subject_id
 
 subject_dist <- vegan::vegdist(subject_mat, method = "bray")
 
@@ -618,113 +796,113 @@ perm_subject <- vegan::adonis2(
 
 perm_subject_table <- adonis_to_table(perm_subject)
 save_table(perm_subject_table, "02_beta_subject_level_PERMANOVA.tsv")
-print(perm_subject_table)
+base::print(perm_subject_table)
 
-# PERMANOVA dispersion 점검
 bd_subject <- vegan::betadisper(subject_dist, subject_meta$study_condition)
-bd_subject_anova <- as.data.frame(anova(bd_subject)) |>
+bd_subject_anova <- base::as.data.frame(stats::anova(bd_subject)) %>%
   tibble::rownames_to_column("term")
-bd_subject_perm <- as.data.frame(permutest(bd_subject, permutations = 999)$tab) |>
+bd_subject_perm <- base::as.data.frame(vegan::permutest(bd_subject, permutations = 999)$tab) %>%
   tibble::rownames_to_column("term")
 
 save_table(bd_subject_anova, "02_beta_subject_level_betadisper_anova.tsv")
 save_table(bd_subject_perm, "02_beta_subject_level_betadisper_permutest.tsv")
 
-print(bd_subject_anova)
-print(bd_subject_perm)
+base::print(bd_subject_anova)
+base::print(bd_subject_perm)
 ```
 
-## 5-4. Within-subject time PERMANOVA
+## 7-5. Within-subject time PERMANOVA
 
 ```{r beta-within-subject-permanova}
 # ============================================================
 # 목적:
-# - 같은 subject 안에서 시간이 지남에 따라 community composition이 변하는지 평가함.
+# - 같은 subject 안에서 time_months가 community composition에 미치는 영향을 평가함.
 #
 # 주의:
-# - study_condition은 subject마다 고정된 between-subject 변수이므로,
-#   strata = subject_id를 둔 within-subject permutation에서는 group 효과 검정보다
-#   time effect 평가에 더 적합함.
+# - study_condition은 subject마다 고정된 between-subject 변수임.
+# - strata = subject_id를 둔 restricted permutation에서는 group 효과보다 time effect 평가에 더 적합함.
 # ============================================================
 
 perm_time_within_subject <- vegan::adonis2(
-  bc_k ~ age_months,
+  bc_k ~ time_months,
   data = meta_long,
   permutations = 999,
   strata = meta_long$subject_id
 )
 
 perm_time_within_subject_table <- adonis_to_table(perm_time_within_subject)
-save_table(perm_time_within_subject_table, "02_beta_within_subject_time_PERMANOVA.tsv")
-print(perm_time_within_subject_table)
+save_table(perm_time_within_subject_table, "02_beta_within_subject_time_months_PERMANOVA.tsv")
+base::print(perm_time_within_subject_table)
 ```
 
-## 5-5. Baseline distance 계산 및 LMM
+## 7-6. Baseline distance 계산 및 LMM
 
 ```{r beta-baseline-distance}
 # ============================================================
 # 목적:
 # - 각 subject의 첫 sample을 baseline으로 정의함.
 # - 이후 sample이 baseline microbiome에서 얼마나 멀어졌는지 Bray-Curtis distance로 계산함.
-# - 이 값을 outcome으로 하여 시간 변화와 group-by-time interaction을 LMM으로 평가함.
+# - outcome: distance_from_baseline
+# - time variable: time_from_baseline_months
 #
-# 기존 결과 기준:
-# - age_months 효과는 유의함.
-# - study_conditionT1D와 age_months:study_conditionT1D는 유의하지 않음.
+# 통계 모델:
+# - distance_from_baseline ~ time_from_baseline_months * study_condition + (1 | subject_id)
 # ============================================================
 
-baseline_samples <- meta_long |>
-  dplyr::group_by(subject_id) |>
-  dplyr::slice_min(age_months, n = 1, with_ties = FALSE) |>
-  dplyr::ungroup() |>
+baseline_samples <- meta_long %>%
+  dplyr::group_by(.data$subject_id) %>%
+  dplyr::slice_min(.data$time_months, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
   dplyr::select(
     subject_id,
     baseline_sample_id = sample_id,
-    baseline_age_months = age_months
+    baseline_time_months = time_months
   )
 
-meta_beta_baseline <- meta_long |>
-  dplyr::left_join(baseline_samples, by = "subject_id") |>
-  dplyr::rowwise() |>
+meta_beta_baseline <- meta_long %>%
+  dplyr::left_join(baseline_samples, by = "subject_id") %>%
+  dplyr::rowwise() %>%
   dplyr::mutate(
-    distance_from_baseline = bc_k_mat[sample_id, baseline_sample_id],
-    time_from_baseline = age_months - baseline_age_months
-  ) |>
+    distance_from_baseline = bc_k_mat[.data$sample_id, .data$baseline_sample_id],
+    time_from_baseline_months = .data$time_months - .data$baseline_time_months
+  ) %>%
   dplyr::ungroup()
 
-save_table(meta_beta_baseline, "02_beta_BrayCurtis_distance_from_baseline.tsv")
+save_table(meta_beta_baseline, "02_beta_BrayCurtis_distance_from_baseline_time_months.tsv")
 
-p_baseline_distance <- ggplot(
-  meta_beta_baseline,
-  aes(x = age_months, y = distance_from_baseline, group = subject_id, color = study_condition)
-) +
-  geom_line(alpha = 0.35, linewidth = 0.5) +
-  geom_point(alpha = 0.65, size = 1.4) +
-  geom_smooth(
-    aes(group = study_condition),
+p_baseline_distance <- meta_beta_baseline %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$time_from_baseline_months,
+      y = .data$distance_from_baseline,
+      group = .data$subject_id,
+      color = .data$study_condition
+    )
+  ) +
+  ggplot2::geom_line(alpha = 0.35, linewidth = 0.5) +
+  ggplot2::geom_point(alpha = 0.65, size = 1.4) +
+  ggplot2::geom_smooth(
+    ggplot2::aes(group = .data$study_condition),
     method = "lm",
     se = TRUE,
     linewidth = 1.1
   ) +
-  scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
-    labels = c("control" = "Control", "T1D" = "T1D")
-  ) +
-  labs(
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
     title = "Within-subject microbiome change from baseline",
     subtitle = "Bray-Curtis distance from each subject's first sample",
-    x = "Age / time variable",
+    x = "Time from baseline (months)",
     y = "Bray-Curtis distance from baseline",
     color = "Group"
   ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom")
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
 
-print(p_baseline_distance)
-save_plot(p_baseline_distance, "02_beta_BrayCurtis_distance_from_baseline.png", width = 7, height = 5)
+base::print(p_baseline_distance)
+save_plot(p_baseline_distance, "02_beta_BrayCurtis_distance_from_baseline_time_months.png", width = 7, height = 5)
 
 fit_baseline_lmm <- lmerTest::lmer(
-  distance_from_baseline ~ age_months * study_condition + (1 | subject_id),
+  distance_from_baseline ~ time_from_baseline_months * study_condition + (1 | subject_id),
   data = meta_beta_baseline,
   REML = TRUE
 )
@@ -733,37 +911,35 @@ baseline_lmm_result <- broom.mixed::tidy(
   fit_baseline_lmm,
   effects = "fixed",
   conf.int = TRUE
-) |>
-  dplyr::mutate(
-    significance = sig_label(p.value)
-  )
+) %>%
+  dplyr::mutate(significance = sig_label(.data$p.value))
 
-save_table(baseline_lmm_result, "02_beta_BrayCurtis_baseline_distance_LMM_results.tsv")
-print(baseline_lmm_result)
+save_table(baseline_lmm_result, "02_beta_BrayCurtis_baseline_distance_LMM_results_time_months.tsv")
+base::print(baseline_lmm_result)
 
-beta_key_terms <- baseline_lmm_result |>
-  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
+beta_key_terms <- baseline_lmm_result %>%
+  dplyr::filter(.data$term %in% c("time_from_baseline_months", "study_conditionT1D", "time_from_baseline_months:study_conditionT1D")) %>%
   dplyr::select(term, estimate, conf.low, conf.high, p.value, significance)
 
-save_table(beta_key_terms, "02_beta_BrayCurtis_baseline_distance_key_terms.tsv")
+save_table(beta_key_terms, "02_beta_BrayCurtis_baseline_distance_key_terms_time_months.tsv")
 ```
 
-# 6. Taxa-level longitudinal analysis
+# 8. Taxa-level longitudinal analysis
 
-## 6-1. 분석 목적과 가정
+## 8-1. 분석 목적과 가정
 
 ```{r taxa-method-comment, eval=FALSE}
 # ============================================================
 # Taxa-level 분석 정의:
-# - 개별 taxon의 abundance가 시간에 따라 변하는지 평가하는 분석임.
+# - 개별 taxon의 abundance가 time_months에 따라 변하는지 평가하는 분석임.
 #
 # 분석 목적:
-# - 특정 taxon이 age_months에 따라 증가 또는 감소하는지 평가함.
+# - 특정 taxon이 time_months에 따라 증가 또는 감소하는지 평가함.
 # - T1D군에서 그 변화율이 대조군과 다른지 interaction으로 평가함.
 #
 # 통계 방법:
 # - CLR-transformed abundance 기반 taxon-wise LMM.
-# - 모델: clr_abundance ~ age_months * study_condition + (1 | subject_id)
+# - 모델: clr_abundance ~ time_months * study_condition + (1 | subject_id)
 #
 # 독립성:
 # - 같은 subject 내 반복측정은 독립이 아님.
@@ -783,123 +959,179 @@ save_table(beta_key_terms, "02_beta_BrayCurtis_baseline_distance_key_terms.tsv")
 # ============================================================
 ```
 
-## 6-2. Taxa trajectory 시각화
+## 8-2. Taxa trajectory 시각화
 
 ```{r taxa-trajectory}
-taxa_long_df <- as.data.frame(t(ra_prop[selected_taxa, , drop = FALSE])) |>
-  tibble::rownames_to_column("sample_id") |>
+taxa_long_df <- base::as.data.frame(base::t(ra_prop[selected_taxa, , drop = FALSE])) %>%
+  tibble::rownames_to_column("sample_id") %>%
   dplyr::left_join(
-    meta_long |> dplyr::select(sample_id, subject_id, study_condition, age_months),
+    meta_long %>% dplyr::select(sample_id, subject_id, study_condition, time_months, time_years),
     by = "sample_id"
-  ) |>
+  ) %>%
   tidyr::pivot_longer(
     cols = dplyr::all_of(selected_taxa),
     names_to = "taxon",
     values_to = "relative_abundance"
-  ) |>
+  ) %>%
   dplyr::mutate(
-    rel_abund_log10 = log10(relative_abundance + 1e-5),
-    taxon_short = short_taxon_name(taxon)
+    rel_abund_log10 = base::log10(.data$relative_abundance + 1e-5),
+    taxon_short = short_taxon_name(.data$taxon)
   )
 
-save_table(taxa_long_df, "03_taxa_log10_relative_abundance_long.tsv")
+save_table(taxa_long_df, "03_taxa_log10_relative_abundance_long_time_months.tsv")
 
-p_taxa_trajectory <- ggplot(
-  taxa_long_df,
-  aes(x = age_months, y = rel_abund_log10, group = subject_id, color = study_condition)
-) +
-  geom_line(alpha = 0.25, linewidth = 0.4) +
-  geom_point(alpha = 0.45, size = 0.9) +
-  geom_smooth(
-    aes(group = study_condition),
+p_taxa_trajectory <- taxa_long_df %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$time_months,
+      y = .data$rel_abund_log10,
+      group = .data$subject_id,
+      color = .data$study_condition
+    )
+  ) +
+  ggplot2::geom_line(alpha = 0.25, linewidth = 0.4) +
+  ggplot2::geom_point(alpha = 0.45, size = 0.9) +
+  ggplot2::geom_smooth(
+    ggplot2::aes(group = .data$study_condition),
     method = "lm",
     se = TRUE,
     linewidth = 0.9
   ) +
-  facet_wrap(~ taxon_short, scales = "free_y", ncol = 3) +
-  scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
-    labels = c("control" = "Control", "T1D" = "T1D")
-  ) +
-  labs(
+  ggplot2::facet_wrap(~ taxon_short, scales = "free_y", ncol = 3) +
+  ggplot2::scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
     title = "Taxa-level longitudinal trajectories",
     subtitle = "Exploratory visualization using log10(relative abundance + 1e-5)",
-    x = "Age / time variable",
+    x = "Time from first collection (months)",
     y = "log10(relative abundance + 1e-5)",
     color = "Group"
   ) +
-  theme_bw(base_size = 11) +
-  theme(
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
     legend.position = "bottom",
-    strip.text = element_text(size = 8)
+    strip.text = ggplot2::element_text(size = 8)
   )
 
-print(p_taxa_trajectory)
-save_plot(p_taxa_trajectory, "03_taxa_log10_trajectory_top12.png", width = 9, height = 7)
+base::print(p_taxa_trajectory)
+save_plot(p_taxa_trajectory, "03_taxa_log10_trajectory_top12_time_months.png", width = 9, height = 7)
 ```
 
-## 6-3. CLR 변환 및 taxon-wise LMM
+## 8-3. 추가 시각화: time-bin 기반 top taxa heatmap
+
+```{r taxa-timebin-heatmap}
+# ============================================================
+# 목적:
+# - 개별 subject line plot은 복잡할 수 있으므로 time bin별 평균 패턴을 함께 확인함.
+# - 여기서는 6개월 단위 bin을 사용함.
+# - 통계 검정용이 아니라 전체 경향을 파악하기 위한 시각화임.
+# ============================================================
+
+time_bin_width_months <- 6
+
+composition_timebin_df <- taxa_long_df %>%
+  dplyr::mutate(
+    time_bin_start = base::floor(.data$time_months / time_bin_width_months) * time_bin_width_months,
+    time_bin = base::paste0(.data$time_bin_start, "-", .data$time_bin_start + time_bin_width_months, " mo")
+  ) %>%
+  dplyr::group_by(.data$study_condition, .data$time_bin_start, .data$time_bin, .data$taxon_short) %>%
+  dplyr::summarise(
+    mean_relative_abundance = base::mean(.data$relative_abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(.data$study_condition, .data$time_bin_start, .data$taxon_short)
+
+save_table(composition_timebin_df, "03_taxa_timebin_mean_relative_abundance.tsv")
+
+p_taxa_timebin_heatmap <- composition_timebin_df %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$time_bin,
+      y = .data$taxon_short,
+      fill = .data$mean_relative_abundance
+    )
+  ) +
+  ggplot2::geom_tile(color = "white", linewidth = 0.2) +
+  ggplot2::facet_wrap(~ study_condition, nrow = 1) +
+  ggplot2::scale_fill_viridis_c(option = "magma") +
+  ggplot2::labs(
+    title = "Top taxa composition over time bins",
+    subtitle = "Mean relative abundance summarized every 6 months",
+    x = "Time bin from first collection",
+    y = "Taxon",
+    fill = "Mean relative abundance"
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+base::print(p_taxa_timebin_heatmap)
+save_plot(p_taxa_timebin_heatmap, "03_taxa_timebin_heatmap_top12.png", width = 9, height = 6)
+```
+
+## 8-4. CLR 변환 및 taxon-wise LMM
 
 ```{r taxa-clr-lmm}
 make_clr <- function(mat, pseudocount = NULL) {
-  if (is.null(pseudocount)) {
-    positive_min <- min(mat[mat > 0], na.rm = TRUE)
+  if (base::is.null(pseudocount)) {
+    positive_min <- base::min(mat[mat > 0], na.rm = TRUE)
     pseudocount <- positive_min / 2
   }
 
   mat_pc <- mat + pseudocount
-  mat_prop <- sweep(mat_pc, 2, colSums(mat_pc), FUN = "/")
-  log_mat <- log(mat_prop)
-  clr_mat <- sweep(log_mat, 2, colMeans(log_mat), FUN = "-")
+  mat_prop <- base::sweep(mat_pc, 2, base::colSums(mat_pc), FUN = "/")
+  log_mat <- base::log(mat_prop)
+  clr_mat <- base::sweep(log_mat, 2, base::colMeans(log_mat), FUN = "-")
 
-  attr(clr_mat, "pseudocount") <- pseudocount
+  base::attr(clr_mat, "pseudocount") <- pseudocount
   clr_mat
 }
 
 clr_prop <- make_clr(ra_prop)
-pseudocount_used <- attr(clr_prop, "pseudocount")
+pseudocount_used <- base::attr(clr_prop, "pseudocount")
 
-pseudocount_table <- data.frame(
-  pseudocount_used = pseudocount_used
-)
-
+pseudocount_table <- base::data.frame(pseudocount_used = pseudocount_used)
 save_table(pseudocount_table, "03_taxa_CLR_pseudocount.tsv")
-print(pseudocount_table)
+base::print(pseudocount_table)
 
-clr_long_df <- as.data.frame(t(clr_prop[selected_taxa, , drop = FALSE])) |>
-  tibble::rownames_to_column("sample_id") |>
+clr_long_df <- base::as.data.frame(base::t(clr_prop[selected_taxa, , drop = FALSE])) %>%
+  tibble::rownames_to_column("sample_id") %>%
   dplyr::left_join(
-    meta_long |> dplyr::select(sample_id, subject_id, study_condition, age_months),
+    meta_long %>% dplyr::select(sample_id, subject_id, study_condition, time_months, time_years),
     by = "sample_id"
-  ) |>
+  ) %>%
   tidyr::pivot_longer(
     cols = dplyr::all_of(selected_taxa),
     names_to = "taxon",
     values_to = "clr_abundance"
-  ) |>
+  ) %>%
   dplyr::filter(
-    !is.na(clr_abundance),
-    !is.na(subject_id),
-    !is.na(study_condition),
-    !is.na(age_months)
-  ) |>
-  dplyr::mutate(
-    taxon_short = short_taxon_name(taxon)
-  )
+    !base::is.na(.data$clr_abundance),
+    !base::is.na(.data$subject_id),
+    !base::is.na(.data$study_condition),
+    !base::is.na(.data$time_months)
+  ) %>%
+  dplyr::mutate(taxon_short = short_taxon_name(.data$taxon))
 
-save_table(clr_long_df, "03_taxa_CLR_abundance_long.tsv")
+save_table(clr_long_df, "03_taxa_CLR_abundance_long_time_months.tsv")
 
 run_taxon_lmm <- function(one_taxon, dat) {
-  dat_one <- dat |>
-    dplyr::filter(taxon == one_taxon)
+  dat_one <- dat %>%
+    dplyr::filter(.data$taxon == one_taxon)
 
-  if (dplyr::n_distinct(dat_one$study_condition) < 2) return(NULL)
-  if (dplyr::n_distinct(dat_one$subject_id) < 4) return(NULL)
+  if (dplyr::n_distinct(dat_one$study_condition) < 2) {
+    return(NULL)
+  }
 
-  fit <- tryCatch(
+  if (dplyr::n_distinct(dat_one$subject_id) < 4) {
+    return(NULL)
+  }
+
+  fit <- base::tryCatch(
     {
       lmerTest::lmer(
-        clr_abundance ~ age_months * study_condition + (1 | subject_id),
+        clr_abundance ~ time_months * study_condition + (1 | subject_id),
         data = dat_one,
         REML = TRUE
       )
@@ -907,186 +1139,705 @@ run_taxon_lmm <- function(one_taxon, dat) {
     error = function(e) NULL
   )
 
-  if (is.null(fit)) return(NULL)
+  if (base::is.null(fit)) {
+    return(NULL)
+  }
 
   broom.mixed::tidy(
     fit,
     effects = "fixed",
     conf.int = TRUE
-  ) |>
+  ) %>%
     dplyr::mutate(taxon = one_taxon)
 }
 
-taxa_clr_lmm_results <- lapply(
+taxa_clr_lmm_results <- base::lapply(
   selected_taxa,
   run_taxon_lmm,
   dat = clr_long_df
-) |>
-  dplyr::bind_rows() |>
-  dplyr::group_by(term) |>
+) %>%
+  dplyr::bind_rows() %>%
+  dplyr::group_by(.data$term) %>%
+  dplyr::mutate(p_adj_BH = stats::p.adjust(.data$p.value, method = "BH")) %>%
+  dplyr::ungroup() %>%
   dplyr::mutate(
-    p_adj_BH = p.adjust(p.value, method = "BH")
-  ) |>
-  dplyr::ungroup() |>
-  dplyr::mutate(
-    taxon_short = short_taxon_name(taxon),
-    significance = sig_label(p.value, p_adj_BH)
+    taxon_short = short_taxon_name(.data$taxon),
+    significance = sig_label(.data$p.value, .data$p_adj_BH)
   )
 
-save_table(taxa_clr_lmm_results, "03_taxa_CLR_LMM_results.tsv")
-print(taxa_clr_lmm_results)
+save_table(taxa_clr_lmm_results, "03_taxa_CLR_LMM_results_time_months.tsv")
+base::print(taxa_clr_lmm_results)
 ```
 
-## 6-4. Taxa-level 시간 효과 및 interaction 결과 정리
-
-```{r taxa-result-summary}
-# ============================================================
-# 결과 해석 최적화:
-# - 기존 결과에서는 group-specific interaction이 FDR < 0.05에 도달하지 않았음.
-# - 따라서 main 결과 그림은 age_months 효과와 interaction 효과를 분리해서 저장함.
-# - interaction은 "T1D에서 시간 변화율이 대조군과 다른가?"라는 질문에 해당함.
-# ============================================================
-
-taxa_age_effect <- taxa_clr_lmm_results |>
-  dplyr::filter(term == "age_months") |>
-  dplyr::arrange(p_adj_BH, p.value)
-
-taxa_interaction_effect <- taxa_clr_lmm_results |>
-  dplyr::filter(term == "age_months:study_conditionT1D") |>
-  dplyr::arrange(p_adj_BH, p.value)
-
-taxa_group_effect <- taxa_clr_lmm_results |>
-  dplyr::filter(term == "study_conditionT1D") |>
-  dplyr::arrange(p_adj_BH, p.value)
-
-save_table(taxa_age_effect, "03_taxa_CLR_LMM_age_effect.tsv")
-save_table(taxa_group_effect, "03_taxa_CLR_LMM_group_effect.tsv")
-save_table(taxa_interaction_effect, "03_taxa_CLR_LMM_age_by_group_interaction.tsv")
-
-print(taxa_age_effect)
-print(taxa_interaction_effect)
-
-taxa_significant_summary <- taxa_clr_lmm_results |>
-  dplyr::filter(term != "(Intercept)") |>
-  dplyr::group_by(term) |>
-  dplyr::summarise(
-    n_nominal_p_lt_0_05 = sum(p.value < 0.05, na.rm = TRUE),
-    n_FDR_lt_0_05 = sum(p_adj_BH < 0.05, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-save_table(taxa_significant_summary, "03_taxa_CLR_LMM_significance_summary.tsv")
-print(taxa_significant_summary)
-```
-
-## 6-5. Taxa-level LMM 결과 시각화
+## 8-5. Taxa-level LMM 결과 정리 및 시각화
 
 ```{r taxa-result-plots}
-p_taxa_age_effect <- ggplot(
-  taxa_age_effect,
-  aes(x = reorder(taxon_short, estimate), y = estimate, fill = significance)
-) +
-  geom_col(width = 0.7) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  coord_flip() +
-  labs(
+taxa_time_effect <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term == "time_months") %>%
+  dplyr::arrange(.data$p_adj_BH, .data$p.value)
+
+taxa_group_effect <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term == "study_conditionT1D") %>%
+  dplyr::arrange(.data$p_adj_BH, .data$p.value)
+
+taxa_interaction_effect <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term == "time_months:study_conditionT1D") %>%
+  dplyr::arrange(.data$p_adj_BH, .data$p.value)
+
+save_table(taxa_time_effect, "03_taxa_CLR_LMM_time_months_effect.tsv")
+save_table(taxa_group_effect, "03_taxa_CLR_LMM_group_effect.tsv")
+save_table(taxa_interaction_effect, "03_taxa_CLR_LMM_time_by_group_interaction.tsv")
+
+p_taxa_time_effect <- taxa_time_effect %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = stats::reorder(.data$taxon_short, .data$estimate),
+      y = .data$estimate,
+      fill = .data$significance
+    )
+  ) +
+  ggplot2::geom_col(width = 0.7) +
+  ggplot2::geom_errorbar(ggplot2::aes(ymin = .data$conf.low, ymax = .data$conf.high), width = 0.2) +
+  ggplot2::geom_hline(yintercept = 0, linetype = 2) +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
     title = "Taxa-level time effect",
-    subtitle = "LMM term: age_months; outcome: CLR-transformed abundance",
+    subtitle = "LMM term: time_months; outcome: CLR-transformed abundance",
     x = "Taxon",
     y = "Estimated coefficient",
     fill = "Significance"
   ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "bottom")
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
 
-print(p_taxa_age_effect)
-save_plot(p_taxa_age_effect, "03_taxa_CLR_LMM_age_effect.png", width = 8, height = 6)
-
-p_taxa_interaction <- ggplot(
-  taxa_interaction_effect,
-  aes(x = reorder(taxon_short, estimate), y = estimate, fill = significance)
-) +
-  geom_col(width = 0.7) +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  coord_flip() +
-  labs(
+p_taxa_interaction <- taxa_interaction_effect %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = stats::reorder(.data$taxon_short, .data$estimate),
+      y = .data$estimate,
+      fill = .data$significance
+    )
+  ) +
+  ggplot2::geom_col(width = 0.7) +
+  ggplot2::geom_errorbar(ggplot2::aes(ymin = .data$conf.low, ymax = .data$conf.high), width = 0.2) +
+  ggplot2::geom_hline(yintercept = 0, linetype = 2) +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
     title = "Taxa-level group-specific longitudinal effect",
-    subtitle = "LMM term: age_months × T1D; FDR should be used for interpretation",
+    subtitle = "LMM term: time_months × T1D; FDR should be used for interpretation",
     x = "Taxon",
     y = "Estimated interaction coefficient",
     fill = "Significance"
   ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "bottom")
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
 
-print(p_taxa_interaction)
-save_plot(p_taxa_interaction, "03_taxa_CLR_LMM_age_by_group_interaction.png", width = 8, height = 6)
+base::print(p_taxa_time_effect)
+base::print(p_taxa_interaction)
+save_plot(p_taxa_time_effect, "03_taxa_CLR_LMM_time_months_effect.png", width = 8, height = 6)
+save_plot(p_taxa_interaction, "03_taxa_CLR_LMM_time_by_group_interaction.png", width = 8, height = 6)
+
+taxa_significant_summary <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term != "(Intercept)") %>%
+  dplyr::group_by(.data$term) %>%
+  dplyr::summarise(
+    n_nominal_p_lt_0_05 = base::sum(.data$p.value < 0.05, na.rm = TRUE),
+    n_FDR_lt_0_05 = base::sum(.data$p_adj_BH < 0.05, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+save_table(taxa_significant_summary, "03_taxa_CLR_LMM_significance_summary.tsv")
+base::print(taxa_significant_summary)
 ```
 
-# 7. 결과 요약 테이블 자동 생성
 
-```{r final-summary}
+# 9. 결과 기반 해석 및 맞춤 통계 방법
+
+## 9-1. 결과 기반 통계 선택 원칙
+
+```{r result-based-method-comment, eval=FALSE}
 # ============================================================
 # 목적:
-# - alpha, beta, taxa 분석에서 핵심 term만 모아 최종 요약표를 만듦.
-# - manuscript 또는 보고서 작성 시 Table로 옮기기 쉽게 구성함.
+# - 앞선 full model 결과를 바탕으로 최종 보고에 사용할 통계 방법을 단순화함.
+# - 종단자료에서는 처음부터 group 차이만 보지 않고 time_months 효과와 time × group interaction을 함께 평가함.
+#
+# 원칙:
+# 1. Full model은 1차 검정용으로 유지함.
+#    - Alpha: shannon ~ time_months * study_condition + (1 | subject_id)
+#    - Beta: distance_from_baseline ~ time_from_baseline_months * study_condition + (1 | subject_id)
+#    - Taxa: clr_abundance ~ time_months * study_condition + (1 | subject_id)
+#
+# 2. Interaction이 유의하지 않으면 group-specific trajectory를 강하게 해석하지 않음.
+#    - 이 경우 최종 해석은 pooled time effect 또는 time-only model 중심으로 제시함.
+#
+# 3. Group effect가 유의하지 않으면 baseline group difference를 강조하지 않음.
+#
+# 4. Taxa-level 결과는 다중검정을 포함하므로 nominal p < 0.05만으로 결론 내리지 않음.
+#    - 최종 해석은 FDR < 0.05인 결과 중심으로 제한함.
+#
+# 5. 결과 기반 단순화는 post-hoc fishing이 아니라, full model에서 interaction이 없음을 확인한 뒤
+#    더 간결한 effect size를 제시하기 위한 보조 분석임.
 # ============================================================
-
-alpha_final <- shannon_lmm_result |>
-  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
-  dplyr::mutate(
-    analysis = "Alpha diversity",
-    outcome = "Shannon diversity"
-  ) |>
-  dplyr::select(
-    analysis, outcome, term, estimate, conf.low, conf.high, p.value, significance
-  )
-
-beta_final <- baseline_lmm_result |>
-  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
-  dplyr::mutate(
-    analysis = "Beta diversity",
-    outcome = "Bray-Curtis distance from baseline"
-  ) |>
-  dplyr::select(
-    analysis, outcome, term, estimate, conf.low, conf.high, p.value, significance
-  )
-
-taxa_final <- taxa_clr_lmm_results |>
-  dplyr::filter(
-    term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")
-  ) |>
-  dplyr::mutate(
-    analysis = "Taxa-level",
-    outcome = taxon_short
-  ) |>
-  dplyr::select(
-    analysis, outcome, term, estimate, conf.low, conf.high, p.value, p_adj_BH, significance
-  )
-
-save_table(alpha_final, "04_final_alpha_key_results.tsv")
-save_table(beta_final, "04_final_beta_key_results.tsv")
-save_table(taxa_final, "04_final_taxa_key_results.tsv")
-
-# alpha/beta는 FDR 열이 없으므로 taxa와 합치기 전 NA로 맞춤.
-alpha_beta_final <- dplyr::bind_rows(alpha_final, beta_final) |>
-  dplyr::mutate(p_adj_BH = NA_real_) |>
-  dplyr::select(
-    analysis, outcome, term, estimate, conf.low, conf.high, p.value, p_adj_BH, significance
-  )
-
-final_key_results <- dplyr::bind_rows(alpha_beta_final, taxa_final)
-
-save_table(final_key_results, "04_final_key_results_all.tsv")
-print(final_key_results)
 ```
 
-# 8. Session information
+## 9-2. 현재 결과 요약 문장 자동 생성
+
+```{r result-interpretation-text}
+alpha_time_row <- shannon_lmm_result %>%
+  dplyr::filter(.data$term == "time_months")
+
+alpha_group_row <- shannon_lmm_result %>%
+  dplyr::filter(.data$term == "study_conditionT1D")
+
+alpha_interaction_row <- shannon_lmm_result %>%
+  dplyr::filter(.data$term == "time_months:study_conditionT1D")
+
+beta_time_row <- baseline_lmm_result %>%
+  dplyr::filter(.data$term == "time_from_baseline_months")
+
+beta_group_row <- baseline_lmm_result %>%
+  dplyr::filter(.data$term == "study_conditionT1D")
+
+beta_interaction_row <- baseline_lmm_result %>%
+  dplyr::filter(.data$term == "time_from_baseline_months:study_conditionT1D")
+
+subject_perm_model_row <- perm_subject_table %>%
+  dplyr::filter(.data$term == "Model")
+
+taxa_fdr_summary <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term != "(Intercept)") %>%
+  dplyr::group_by(.data$term) %>%
+  dplyr::summarise(
+    n_taxa = dplyr::n(),
+    n_nominal_p_lt_0_05 = base::sum(.data$p.value < 0.05, na.rm = TRUE),
+    n_FDR_lt_0_05 = base::sum(.data$p_adj_BH < 0.05, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+taxa_time_fdr_hits <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term == "time_months", .data$p_adj_BH < 0.05) %>%
+  dplyr::arrange(.data$p_adj_BH, .data$p.value)
+
+taxa_interaction_fdr_hits <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term == "time_months:study_conditionT1D", .data$p_adj_BH < 0.05) %>%
+  dplyr::arrange(.data$p_adj_BH, .data$p.value)
+
+result_interpretation_table <- base::data.frame(
+  domain = base::c(
+    "Alpha diversity",
+    "Beta diversity",
+    "Subject-level beta diversity",
+    "Taxa-level"
+  ),
+  observed_result = base::c(
+    base::sprintf(
+      "Shannon diversity increased with time_months (estimate = %.4f, p = %.4g). Group effect and time × group interaction were not significant (group p = %.4g; interaction p = %.4g).",
+      alpha_time_row$estimate[1],
+      alpha_time_row$p.value[1],
+      alpha_group_row$p.value[1],
+      alpha_interaction_row$p.value[1]
+    ),
+    base::sprintf(
+      "Bray-Curtis distance from baseline increased with time_from_baseline_months (estimate = %.4f, p = %.4g). Group effect and time × group interaction were not significant (group p = %.4g; interaction p = %.4g).",
+      beta_time_row$estimate[1],
+      beta_time_row$p.value[1],
+      beta_group_row$p.value[1],
+      beta_interaction_row$p.value[1]
+    ),
+    base::sprintf(
+      "Subject-level PERMANOVA did not support a group-level community difference (R2 = %.4f, p = %.4g).",
+      subject_perm_model_row$R2[1],
+      subject_perm_model_row$`Pr(>F)`[1]
+    ),
+    base::sprintf(
+      "Taxa-level CLR-LMM found %s FDR-significant time-associated taxa and %s FDR-significant time × group interaction taxa.",
+      base::nrow(taxa_time_fdr_hits),
+      base::nrow(taxa_interaction_fdr_hits)
+    )
+  ),
+  interpretation = base::c(
+    "Alpha diversity appears to increase over follow-up time, but there is no evidence that this trajectory differs between T1D and control groups.",
+    "Within-subject community composition progressively diverges from baseline over time, but the degree of divergence is not clearly different between T1D and control groups.",
+    "After reducing pseudoreplication by averaging samples at the subject level, there is no clear overall group separation.",
+    "Taxa-level interpretation should focus on FDR-significant time effects. Nominal interaction signals should be treated as exploratory only."
+  ),
+  recommended_reporting = base::c(
+    "Report the full interaction LMM as the primary test and use a reduced time-only LMM as the parsimonious final effect estimate.",
+    "Report the full interaction LMM as the primary test and use a reduced time-only baseline-distance LMM as the parsimonious final effect estimate.",
+    "Do not emphasize global T1D-vs-control separation based on beta diversity. Use this result as support for time-dominant longitudinal change.",
+    "Report FDR-significant taxa from the full CLR-LMM. Because no interaction taxa pass FDR, avoid group-specific taxon trajectory conclusions."
+  )
+)
+
+save_table(result_interpretation_table, "05_result_interpretation_summary.tsv")
+base::print(result_interpretation_table)
+
+result_interpretation_lines <- base::c(
+  "# Result interpretation summary",
+  "",
+  base::paste0("- Alpha diversity: ", result_interpretation_table$observed_result[1]),
+  base::paste0("  Interpretation: ", result_interpretation_table$interpretation[1]),
+  "",
+  base::paste0("- Beta diversity: ", result_interpretation_table$observed_result[2]),
+  base::paste0("  Interpretation: ", result_interpretation_table$interpretation[2]),
+  "",
+  base::paste0("- Subject-level beta diversity: ", result_interpretation_table$observed_result[3]),
+  base::paste0("  Interpretation: ", result_interpretation_table$interpretation[3]),
+  "",
+  base::paste0("- Taxa-level: ", result_interpretation_table$observed_result[4]),
+  base::paste0("  Interpretation: ", result_interpretation_table$interpretation[4])
+)
+
+base::writeLines(
+  result_interpretation_lines,
+  con = base::file.path(tab_dir, "05_result_interpretation_summary.md")
+)
+```
+
+## 9-3. Alpha diversity: 결과 기반 reduced LMM
+
+```{r alpha-result-based-reduced-model}
+# ============================================================
+# 목적:
+# - Full model에서 time × group interaction이 유의하지 않은 경우,
+#   group-specific slope를 과해석하지 않고 전체 subject에서 공통 time effect를 추정함.
+#
+# Full model:
+# - shannon ~ time_months * study_condition + (1 | subject_id)
+#
+# Reduced model:
+# - shannon ~ time_months + (1 | subject_id)
+#
+# 해석:
+# - reduced model의 time_months estimate는 전체 cohort에서 follow-up 시간이 증가할 때
+#   Shannon diversity가 평균적으로 얼마나 변하는지를 의미함.
+# ============================================================
+
+fit_shannon_lmm_reduced <- lmerTest::lmer(
+  shannon ~ time_months + (1 | subject_id),
+  data = meta_long,
+  REML = TRUE
+)
+
+shannon_lmm_reduced_result <- broom.mixed::tidy(
+  fit_shannon_lmm_reduced,
+  effects = "fixed",
+  conf.int = TRUE
+) %>%
+  dplyr::mutate(significance = sig_label(.data$p.value))
+
+save_table(shannon_lmm_reduced_result, "05_alpha_Shannon_reduced_time_only_LMM_results.tsv")
+base::print(shannon_lmm_reduced_result)
+
+fit_shannon_lmm_full_ml <- lmerTest::lmer(
+  shannon ~ time_months * study_condition + (1 | subject_id),
+  data = meta_long,
+  REML = FALSE
+)
+
+fit_shannon_lmm_reduced_ml <- lmerTest::lmer(
+  shannon ~ time_months + (1 | subject_id),
+  data = meta_long,
+  REML = FALSE
+)
+
+alpha_model_comparison <- base::as.data.frame(
+  stats::anova(fit_shannon_lmm_reduced_ml, fit_shannon_lmm_full_ml)
+) %>%
+  tibble::rownames_to_column("model")
+
+save_table(alpha_model_comparison, "05_alpha_Shannon_full_vs_reduced_model_comparison.tsv")
+base::print(alpha_model_comparison)
+
+alpha_reduced_prediction <- base::data.frame(
+  time_months = base::seq(
+    base::min(meta_long$time_months, na.rm = TRUE),
+    base::max(meta_long$time_months, na.rm = TRUE),
+    length.out = 100
+  )
+)
+
+alpha_reduced_prediction$predicted_shannon <- stats::predict(
+  fit_shannon_lmm_reduced,
+  newdata = alpha_reduced_prediction,
+  re.form = NA
+)
+
+save_table(alpha_reduced_prediction, "05_alpha_Shannon_reduced_time_only_prediction.tsv")
+
+p_alpha_reduced <- meta_long %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$time_months,
+      y = .data$shannon
+    )
+  ) +
+  ggplot2::geom_point(ggplot2::aes(color = .data$study_condition), alpha = 0.45, size = 1.4) +
+  ggplot2::geom_line(ggplot2::aes(group = .data$subject_id, color = .data$study_condition), alpha = 0.20, linewidth = 0.4) +
+  ggplot2::geom_line(
+    data = alpha_reduced_prediction,
+    ggplot2::aes(x = .data$time_months, y = .data$predicted_shannon),
+    inherit.aes = FALSE,
+    linewidth = 1.2
+  ) +
+  ggplot2::scale_color_manual(values = base::c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
+    title = "Result-based reduced model for Shannon diversity",
+    subtitle = "Reduced LMM estimates a pooled time effect because time × group interaction was not supported",
+    x = "Time from first collection (months)",
+    y = "Shannon diversity",
+    color = "Group"
+  ) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
+
+base::print(p_alpha_reduced)
+save_plot(p_alpha_reduced, "05_alpha_Shannon_reduced_time_only_LMM.png", width = 7, height = 5)
+```
+
+## 9-4. Beta diversity: 결과 기반 baseline-distance reduced LMM
+
+```{r beta-result-based-reduced-model}
+# ============================================================
+# 목적:
+# - Full model에서 group 및 time × group interaction이 유의하지 않은 경우,
+#   baseline으로부터의 community drift를 전체 subject의 공통 time effect로 추정함.
+#
+# Reduced model:
+# - distance_from_baseline ~ time_from_baseline_months + (1 | subject_id)
+#
+# 해석:
+# - time_from_baseline_months estimate는 baseline 이후 시간이 증가할수록
+#   같은 subject의 microbiome이 baseline에서 얼마나 멀어지는지를 의미함.
+# ============================================================
+
+fit_baseline_lmm_reduced <- lmerTest::lmer(
+  distance_from_baseline ~ time_from_baseline_months + (1 | subject_id),
+  data = meta_beta_baseline,
+  REML = TRUE
+)
+
+baseline_lmm_reduced_result <- broom.mixed::tidy(
+  fit_baseline_lmm_reduced,
+  effects = "fixed",
+  conf.int = TRUE
+) %>%
+  dplyr::mutate(significance = sig_label(.data$p.value))
+
+save_table(baseline_lmm_reduced_result, "05_beta_BrayCurtis_baseline_distance_reduced_time_only_LMM_results.tsv")
+base::print(baseline_lmm_reduced_result)
+
+fit_baseline_lmm_full_ml <- lmerTest::lmer(
+  distance_from_baseline ~ time_from_baseline_months * study_condition + (1 | subject_id),
+  data = meta_beta_baseline,
+  REML = FALSE
+)
+
+fit_baseline_lmm_reduced_ml <- lmerTest::lmer(
+  distance_from_baseline ~ time_from_baseline_months + (1 | subject_id),
+  data = meta_beta_baseline,
+  REML = FALSE
+)
+
+beta_model_comparison <- base::as.data.frame(
+  stats::anova(fit_baseline_lmm_reduced_ml, fit_baseline_lmm_full_ml)
+) %>%
+  tibble::rownames_to_column("model")
+
+save_table(beta_model_comparison, "05_beta_BrayCurtis_baseline_distance_full_vs_reduced_model_comparison.tsv")
+base::print(beta_model_comparison)
+
+beta_reduced_prediction <- base::data.frame(
+  time_from_baseline_months = base::seq(
+    base::min(meta_beta_baseline$time_from_baseline_months, na.rm = TRUE),
+    base::max(meta_beta_baseline$time_from_baseline_months, na.rm = TRUE),
+    length.out = 100
+  )
+)
+
+beta_reduced_prediction$predicted_distance_from_baseline <- stats::predict(
+  fit_baseline_lmm_reduced,
+  newdata = beta_reduced_prediction,
+  re.form = NA
+)
+
+save_table(beta_reduced_prediction, "05_beta_BrayCurtis_baseline_distance_reduced_prediction.tsv")
+
+p_beta_reduced <- meta_beta_baseline %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = .data$time_from_baseline_months,
+      y = .data$distance_from_baseline
+    )
+  ) +
+  ggplot2::geom_point(ggplot2::aes(color = .data$study_condition), alpha = 0.55, size = 1.4) +
+  ggplot2::geom_line(ggplot2::aes(group = .data$subject_id, color = .data$study_condition), alpha = 0.20, linewidth = 0.4) +
+  ggplot2::geom_line(
+    data = beta_reduced_prediction,
+    ggplot2::aes(x = .data$time_from_baseline_months, y = .data$predicted_distance_from_baseline),
+    inherit.aes = FALSE,
+    linewidth = 1.2
+  ) +
+  ggplot2::scale_color_manual(values = base::c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  ggplot2::labs(
+    title = "Result-based reduced model for Bray-Curtis distance from baseline",
+    subtitle = "Reduced LMM estimates a pooled time effect because time × group interaction was not supported",
+    x = "Time from baseline (months)",
+    y = "Bray-Curtis distance from baseline",
+    color = "Group"
+  ) +
+  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme(legend.position = "bottom")
+
+base::print(p_beta_reduced)
+save_plot(p_beta_reduced, "05_beta_BrayCurtis_baseline_distance_reduced_time_only_LMM.png", width = 7, height = 5)
+```
+
+## 9-5. Taxa-level: 결과 기반 pooled time-effect CLR-LMM
+
+```{r taxa-result-based-reduced-model}
+# ============================================================
+# 목적:
+# - Full CLR-LMM에서 FDR-significant time × group interaction이 없으면,
+#   group-specific taxon trajectory보다 pooled time-associated taxa를 최종 결과로 제시함.
+#
+# Reduced model:
+# - clr_abundance ~ time_months + (1 | subject_id)
+#
+# 해석:
+# - time_months estimate > 0: follow-up 시간 증가에 따라 해당 taxon의 CLR abundance 증가.
+# - time_months estimate < 0: follow-up 시간 증가에 따라 해당 taxon의 CLR abundance 감소.
+# - 여러 taxon을 반복 검정하므로 FDR < 0.05 결과만 확정적으로 해석함.
+# ============================================================
+
+run_taxon_reduced_lmm <- function(one_taxon, dat) {
+  dat_one <- dat %>%
+    dplyr::filter(.data$taxon == one_taxon) %>%
+    dplyr::filter(
+      !base::is.na(.data$clr_abundance),
+      !base::is.na(.data$time_months),
+      !base::is.na(.data$subject_id)
+    )
+
+  if (dplyr::n_distinct(dat_one$subject_id) < 3) {
+    return(NULL)
+  }
+
+  fit <- base::tryCatch(
+    {
+      lmerTest::lmer(
+        clr_abundance ~ time_months + (1 | subject_id),
+        data = dat_one,
+        REML = TRUE
+      )
+    },
+    error = function(e) NULL
+  )
+
+  if (base::is.null(fit)) {
+    return(NULL)
+  }
+
+  broom.mixed::tidy(
+    fit,
+    effects = "fixed",
+    conf.int = TRUE
+  ) %>%
+    dplyr::mutate(taxon = one_taxon)
+}
+
+taxa_reduced_lmm_results <- base::lapply(
+  selected_taxa,
+  run_taxon_reduced_lmm,
+  dat = clr_long_df
+) %>%
+  dplyr::bind_rows() %>%
+  dplyr::group_by(.data$term) %>%
+  dplyr::mutate(p_adj_BH = stats::p.adjust(.data$p.value, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    taxon_short = short_taxon_name(.data$taxon),
+    significance = sig_label(.data$p.value, .data$p_adj_BH)
+  )
+
+save_table(taxa_reduced_lmm_results, "05_taxa_CLR_reduced_time_only_LMM_results.tsv")
+
+taxa_reduced_time_effect <- taxa_reduced_lmm_results %>%
+  dplyr::filter(.data$term == "time_months") %>%
+  dplyr::arrange(.data$p_adj_BH, .data$p.value)
+
+save_table(taxa_reduced_time_effect, "05_taxa_CLR_reduced_time_only_effect.tsv")
+base::print(taxa_reduced_time_effect)
+
+taxa_reduced_time_fdr_hits <- taxa_reduced_time_effect %>%
+  dplyr::filter(.data$p_adj_BH < 0.05)
+
+save_table(taxa_reduced_time_fdr_hits, "05_taxa_CLR_reduced_time_only_FDR_significant.tsv")
+base::print(taxa_reduced_time_fdr_hits)
+
+p_taxa_reduced_time <- taxa_reduced_time_effect %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = stats::reorder(.data$taxon_short, .data$estimate),
+      y = .data$estimate,
+      fill = .data$significance
+    )
+  ) +
+  ggplot2::geom_col(width = 0.7) +
+  ggplot2::geom_errorbar(
+    ggplot2::aes(ymin = .data$conf.low, ymax = .data$conf.high),
+    width = 0.2
+  ) +
+  ggplot2::geom_hline(yintercept = 0, linetype = 2) +
+  ggplot2::coord_flip() +
+  ggplot2::labs(
+    title = "Result-based pooled taxa time effect",
+    subtitle = "Reduced CLR-LMM: clr_abundance ~ time_months + (1 | subject_id)",
+    x = "Taxon",
+    y = "Estimated time effect on CLR abundance",
+    fill = "Significance"
+  ) +
+  ggplot2::theme_bw(base_size = 11) +
+  ggplot2::theme(legend.position = "bottom")
+
+base::print(p_taxa_reduced_time)
+save_plot(p_taxa_reduced_time, "05_taxa_CLR_reduced_time_only_effect.png", width = 8, height = 6)
+```
+
+## 9-6. 최종 보고용 문장 생성
+
+```{r result-based-reporting-sentences}
+alpha_reduced_time_row <- shannon_lmm_reduced_result %>%
+  dplyr::filter(.data$term == "time_months")
+
+beta_reduced_time_row <- baseline_lmm_reduced_result %>%
+  dplyr::filter(.data$term == "time_from_baseline_months")
+
+taxa_reduced_report_hits <- taxa_reduced_time_fdr_hits %>%
+  dplyr::mutate(
+    direction = dplyr::case_when(
+      .data$estimate > 0 ~ "increased",
+      .data$estimate < 0 ~ "decreased",
+      TRUE ~ "showed no directional change"
+    ),
+    sentence = base::sprintf(
+      "%s %s over time (estimate = %.4f, FDR = %.4g).",
+      .data$taxon_short,
+      .data$direction,
+      .data$estimate,
+      .data$p_adj_BH
+    )
+  )
+
+taxa_sentence <- base::ifelse(
+  base::nrow(taxa_reduced_report_hits) > 0,
+  base::paste(taxa_reduced_report_hits$sentence, collapse = " "),
+  "No taxa showed FDR-significant pooled time effects in the reduced CLR-LMM."
+)
+
+reporting_sentences <- base::data.frame(
+  section = base::c("Alpha diversity", "Beta diversity", "Taxa-level"),
+  sentence = base::c(
+    base::sprintf(
+      "In the result-based reduced LMM, Shannon diversity increased with time_months (estimate = %.4f, 95%% CI %.4f to %.4f, p = %.4g), supporting a shared longitudinal increase in alpha diversity across groups.",
+      alpha_reduced_time_row$estimate[1],
+      alpha_reduced_time_row$conf.low[1],
+      alpha_reduced_time_row$conf.high[1],
+      alpha_reduced_time_row$p.value[1]
+    ),
+    base::sprintf(
+      "In the result-based reduced LMM, Bray-Curtis distance from baseline increased with time_from_baseline_months (estimate = %.4f, 95%% CI %.4f to %.4f, p = %.4g), indicating progressive within-subject community divergence from baseline.",
+      beta_reduced_time_row$estimate[1],
+      beta_reduced_time_row$conf.low[1],
+      beta_reduced_time_row$conf.high[1],
+      beta_reduced_time_row$p.value[1]
+    ),
+    taxa_sentence
+  )
+)
+
+save_table(reporting_sentences, "05_result_based_reporting_sentences.tsv")
+base::print(reporting_sentences)
+
+base::writeLines(
+  reporting_sentences$sentence,
+  con = base::file.path(tab_dir, "05_result_based_reporting_sentences.txt")
+)
+```
+
+# 10. 최종 요약 테이블
+
+```{r final-summary}
+alpha_final <- shannon_lmm_result %>%
+  dplyr::filter(.data$term %in% c("time_months", "study_conditionT1D", "time_months:study_conditionT1D")) %>%
+  dplyr::mutate(
+    analysis = "Alpha diversity",
+    outcome = "Shannon diversity",
+    p_adj_BH = NA_real_
+  ) %>%
+  dplyr::select(
+    analysis,
+    outcome,
+    term,
+    estimate,
+    conf.low,
+    conf.high,
+    p.value,
+    p_adj_BH,
+    significance
+  )
+
+beta_final <- baseline_lmm_result %>%
+  dplyr::filter(.data$term %in% c("time_from_baseline_months", "study_conditionT1D", "time_from_baseline_months:study_conditionT1D")) %>%
+  dplyr::mutate(
+    analysis = "Beta diversity",
+    outcome = "Bray-Curtis distance from baseline",
+    p_adj_BH = NA_real_
+  ) %>%
+  dplyr::select(
+    analysis,
+    outcome,
+    term,
+    estimate,
+    conf.low,
+    conf.high,
+    p.value,
+    p_adj_BH,
+    significance
+  )
+
+taxa_final <- taxa_clr_lmm_results %>%
+  dplyr::filter(.data$term %in% c("time_months", "study_conditionT1D", "time_months:study_conditionT1D")) %>%
+  dplyr::mutate(
+    analysis = "Taxa-level",
+    outcome = .data$taxon_short
+  ) %>%
+  dplyr::select(
+    analysis,
+    outcome,
+    term,
+    estimate,
+    conf.low,
+    conf.high,
+    p.value,
+    p_adj_BH,
+    significance
+  )
+
+final_key_results <- dplyr::bind_rows(alpha_final, beta_final, taxa_final)
+
+save_table(alpha_final, "04_final_alpha_key_results_time_months.tsv")
+save_table(beta_final, "04_final_beta_key_results_time_months.tsv")
+save_table(taxa_final, "04_final_taxa_key_results_time_months.tsv")
+save_table(final_key_results, "04_final_key_results_all_time_months.tsv")
+
+base::print(final_key_results)
+```
+
+# 11. Session information
 
 ```{r session-info}
-session_info_text <- capture.output(sessionInfo())
-writeLines(session_info_text, file.path(tab_dir, "99_sessionInfo.txt"))
-sessionInfo()
+session_info_text <- utils::capture.output(utils::sessionInfo())
+base::writeLines(session_info_text, base::file.path(tab_dir, "99_sessionInfo.txt"))
+utils::sessionInfo()
 ```
