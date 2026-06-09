@@ -1,0 +1,4 @@
+term	n_nominal_p_lt_0_05	n_FDR_lt_0_05
+study_conditionT1D	0	0
+time_months	4	3
+time_months:study_conditionT1D	3	0

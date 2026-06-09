@@ -1,0 +1,4 @@
+analysis	outcome	term	estimate	conf.low	conf.high	p.value	p_adj_BH	significance
+Alpha diversity	Shannon diversity	time_months	0.0157502020975329	0.00506746713293808	0.0264329370621276	0.00424599548492088	NA	p < 0.01
+Alpha diversity	Shannon diversity	study_conditionT1D	0.0632429270370072	-0.414115427171567	0.540601281245582	0.788266224767365	NA	not significant
+Alpha diversity	Shannon diversity	time_months:study_conditionT1D	0.00251175500503817	-0.0206336095763311	0.0256571195864074	0.830052733482625	NA	not significant

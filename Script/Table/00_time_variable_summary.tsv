@@ -1,0 +1,2 @@
+n_samples	n_subjects	n_missing_days_from_first_collection	n_unique_age_raw	min_age_raw	max_age_raw	n_unique_time_months	min_time_months	max_time_months	min_time_years	max_time_years
+120	19	0	4	0	3	78	0	32.1971252566735	0	2.68309377138946

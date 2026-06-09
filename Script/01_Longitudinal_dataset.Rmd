@@ -1,430 +1,248 @@
 ---
-title: "01_Longitudinal Dataset"
-author: "kim soyeon"
-date: "2026-05-26"
-output: html_document
+title: "Optimized Longitudinal Microbiome Analysis: KosticAD_2015"
+author: "Optimized script with Korean methodological comments"
+date: "2026-06-09"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
 ---
 
-
-
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
-  
-# 데이터셋
-
-
-```{r}
-# ============================================================
-#  curatedMetagenomicData: DIABIMMUNE + IBDMDB 데이터 접근 및 탐색
-#  - KosticAD_2015  (DIABIMMUNE / T1D 영아 종단)
-#  - LloydPrice_2019 (IBDMDB / IBD 종단 multi-omics)
-#
-# ============================================================
-
-
-
-
-
-pkgs <- c(
-  "curatedMetagenomicData",  # 메인 데이터 패키지
-  "SummarizedExperiment",    # SE 객체 조작
-  "TreeSummarizedExperiment",
-  "dplyr",                   # 데이터 조작
-  "ggplot2",                 # 시각화
-  "vegan",                   # 다양성 분석 (alpha/beta)
-  "pheatmap",                # 히트맵
-  "patchwork"                # 플롯 조합
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = TRUE,
+  fig.align = "center"
 )
-
-invisible(lapply(pkgs, function(p) {
-  library(p, character.only = TRUE)
-}))
-
 ```
 
+# 0. 분석 개요
 
-```{r}
+이 Rmd는 `curatedMetagenomicData`의 `KosticAD_2015.relative_abundance` 자료를 이용하여 종단 마이크로바이옴 분석을 수행하는 최적화 예시임.
 
+분석은 크게 세 부분으로 나눔.
+
+1. **Alpha diversity**
+   - 한 sample 내부의 다양성 변화 평가.
+   - 예시 지표: Shannon diversity.
+   - 주 분석: `shannon ~ age_months * study_condition + (1 | subject_id)`.
+
+2. **Beta diversity**
+   - sample 간 전체 군집 조성 차이 평가.
+   - 예시 거리: Bray-Curtis distance.
+   - 주 분석: PCoA, subject-level PERMANOVA, within-subject time PERMANOVA, baseline distance LMM.
+
+3. **Taxa-level longitudinal analysis**
+   - 개별 taxon의 시간 변화 및 group-specific trajectory 평가.
+   - 주 분석: CLR-transformed abundance 기반 taxon-wise LMM.
+
+업로드된 기존 결과 기준으로는 다음과 같은 경향이 확인됨.
+
+- Shannon diversity LMM: `age_months` 효과는 유의하나, `study_conditionT1D`와 `age_months:study_conditionT1D` interaction은 유의하지 않음.
+- Baseline Bray-Curtis distance LMM: `age_months` 효과는 유의하나, group 효과와 interaction은 유의하지 않음.
+- Taxa-level CLR LMM: 일부 taxon에서 시간 효과가 관찰되지만, group-specific longitudinal interaction은 FDR 0.05 기준에서 확정 유의 결과가 없음.
+
+따라서 이 스크립트는 **질병군 차이를 과도하게 강조하지 않고**, 시간 변화와 반복측정 구조를 중심으로 결과를 정리하도록 구성함.
+
+# 1. 패키지 로드 및 출력 폴더 생성
+
+```{r packages}
 # ============================================================
-#  SECTION 1 : 사용 가능한 데이터셋 목록 확인
-# ============================================================
-
-# cMD에서 제공하는 전체 study 목록 미리보기
-all_studies <- sampleMetadata |>
-  dplyr::distinct(study_name) |>
-  dplyr::pull(study_name)
-
-message("cMD에 수록된 전체 study 수: ", length(all_studies)) # 93
-
-# 우리가 관심 있는 두 study 확인
-target_studies <- c("KosticAD_2015", "LloydPrice_2019")
-cat("\n관심 study 존재 여부:\n")
-print(target_studies %in% all_studies) # true, false 
-
-# 두 study의 sample 수 미리 확인
-sampleMetadata |>
-  dplyr::filter(study_name %in% target_studies) |>
-  dplyr::count(study_name, name = "n_samples") |>
-  print() # 120
-```
-
-
-```{r}
-
-# ============================================================
-#  SECTION 2 : DIABIMMUNE — KosticAD_2015 데이터 로드
-# ============================================================
-
-# 사용 가능한 resource 타입 먼저 확인 (dryrun = TRUE)
-curatedMetagenomicData("KosticAD_2015", dryrun = TRUE)
-# 2021-03-31.KosticAD_2015.gene_families
-# 2021-03-31.KosticAD_2015.marker_abundance
-# 2021-03-31.KosticAD_2015.marker_presence
-# 2021-03-31.KosticAD_2015.pathway_abundance
-# 2021-03-31.KosticAD_2015.pathway_coverage
-# 2021-03-31.KosticAD_2015.relative_abundance
-
-# relative_abundance 데이터 로드 (TreeSummarizedExperiment)
-kostic_tse <- curatedMetagenomicData(
-  "KosticAD_2015.relative_abundance",
-  dryrun  = FALSE,
-  counts  = FALSE   # 상대 풍부도 그대로 반환
-)[[1]]
-
-
-# ── 2-1. 기본 구조 확인 ────────────────────────────────────
-print(kostic_tse)
-
-cat("\n--- Dimensions ---\n")
-cat("  Features (taxa) :", nrow(kostic_tse), "\n") # 330
-cat("  Samples         :", ncol(kostic_tse), "\n") # 120
-
-# ── 2-2. 메타데이터 탐색 ───────────────────────────────────
-cat("\n--- Column (sample) metadata 컬럼 목록 ---\n")
-meta_k <- as.data.frame(colData(kostic_tse))
-print(names(meta_k))
-#  [1] "study_name"                 "subject_id"                 "body_site"                 
-#  [4] "study_condition"            "disease"                    "age"                       
-#  [7] "infant_age"                 "age_category"               "gender"                    
-# [10] "country"                    "non_westernized"            "sequencing_platform"       
-# [13] "DNA_extraction_kit"         "PMID"                       "number_reads"              
-# [16] "number_bases"               "minimum_read_length"        "median_read_length"        
-# [19] "NCBI_accession"             "curator"                    "days_from_first_collection"
-# [22] "born_method"                "feeding_practice"           "disease_subtype"           
-# [25] "HLA"                        "autoantibody_positive"      "age_seroconversion"        
-# [28] "age_T1D_diagnosis"         
-
-meta_k$subject_id %>% unique %>% length # 19
-
-meta_k  %>% 
-  group_by(subject_id) %>% 
-  summarise(Count = n())
-#    subject_id Count
-#    <chr>      <int>
-#  1 E001463        6
-#  2 E003251        5
-#  3 E003989        7
-#  4 E006547        5
-#  5 E006574       10
-#  6 E006673        4
-#  7 E010590        9
-#  8 E010629        3
-#  9 E010937        9
-# 10 E016924        6
-# 11 E017751        7
-# 12 E018113        8
-# 13 E018268        7
-# 14 E022137        5
-# 15 E022852        4
-# 16 E026079        4
-# 17 T013815        8
-# 18 T014292        6
-# 19 T025418        7
-
-# 핵심 종단 변수 확인
-
-
-
-cat("\n--- 주요 임상 변수 분포 ---\n")
-cat("\n[study_condition]\n")
-print(table(meta_k$study_condition, useNA = "always"))
-# control     T1D    <NA> 
-#      89      31       0 
-cat("\n[age_category]\n")
-print(table(meta_k$age_category, useNA = "always"))
-  # child newborn    <NA> 
-  #    95      25       0 
-# age 분포 (months)
-cat("\n[age_months summary]\n")
-print(summary(meta_k$age))
-
-# subject 수 (종단 구조 확인)
-if ("subject_id" %in% names(meta_k)) {
-  n_subj <- dplyr::n_distinct(meta_k$subject_id)
-  cat("\n고유 subject 수:", n_subj,
-      "/ 총 샘플:", ncol(kostic_tse),
-      "→ 평균 time points per subject:",
-      round(ncol(kostic_tse) / n_subj, 1), "\n")
-}
-# 고유 subject 수: 19 / 총 샘플: 120 → 평균 time points per subject: 6.3 
-
-
-
-```
-
-
-
-# 분석 예시 
-```{r}
-# ── 2-3. Taxonomy 구조 확인 ────────────────────────────────
-cat("\n--- Taxonomy ranks 포함 여부 ---\n")
-if (!is.null(rowData(kostic_tse))) {
-  print(names(rowData(kostic_tse)))
-}
-
-# 상위 20 taxa (평균 상대풍부도 기준)
-top20_kostic <- rowMeans(assay(kostic_tse, "relative_abundance"), na.rm = TRUE) |>
-  sort(decreasing = TRUE) |>
-  head(20)
-
-cat("\n--- Top 20 taxa (평균 relative abundance) ---\n")
-print(round(top20_kostic * 100, 3))
-
-
-# ── 2-4. Alpha 다양성 계산 ─────────────────────────────────
-ra_k <- assay(kostic_tse, "relative_abundance")
-ra_k[is.na(ra_k)] <- 0
-
-# Shannon diversity
-shannon_k <- vegan::diversity(t(ra_k), index = "shannon")
-meta_k$shannon <- shannon_k[colnames(kostic_tse)]
-
-cat("\n--- Shannon diversity (by condition) ---\n")
-meta_k |>
-  dplyr::group_by(study_condition) |>
-  dplyr::summarise(
-    mean_shannon = round(mean(shannon, na.rm = TRUE), 3),
-    sd_shannon   = round(sd(shannon, na.rm = TRUE), 3),
-    n            = dplyr::n()
-  ) |>
-  print()
-
-# ── 2-5. 시각화 ────────────────────────────────────────────
-# (A) Shannon diversity over time, by T1D status
-if ("age" %in% names(meta_k) && "study_condition" %in% names(meta_k)) {
-  p_shannon_time <- meta_k |>
-    dplyr::filter(!is.na(age), !is.na(study_condition)) |>
-    ggplot(aes(x = age, y = shannon,
-               color = study_condition, group = study_condition)) +
-    geom_point(alpha = 0.3, size = 1.2) +
-    geom_smooth(method = "loess", se = TRUE, linewidth = 1.2) +
-    scale_color_manual(
-      values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
-      labels = c("control" = "Control", "T1D" = "T1D 발병군")
-    ) +
-    labs(
-      title    = "DIABIMMUNE: Shannon Diversity over Time",
-      subtitle = "KosticAD_2015 | T1D vs Control (longitudinal)",
-      x        = "Age (months)",
-      y        = "Shannon Diversity",
-      color    = "Group"
-    ) +
-    theme_bw(base_size = 12) +
-    theme(legend.position = "bottom")
-
-  print(p_shannon_time)
-}
-
-p_shannon_time
-```
-
-
-```{r}
-# (B) Top taxa boxplot (T1D vs Control)
-top5_names <- names(top20_kostic)[1:5]
-top5_df_k <- as.data.frame(t(ra_k[top5_names, , drop = FALSE])) |>
-  tibble::rownames_to_column("sample_id") |>
-  dplyr::left_join(
-    tibble::rownames_to_column(meta_k, "sample_id"),
-    by = "sample_id"
-  ) |>
-  tidyr::pivot_longer(
-    cols      = dplyr::all_of(top5_names),
-    names_to  = "taxon",
-    values_to = "rel_abund"
-  )
-
-p_top5_k <- ggplot(top5_df_k,
-                   aes(x = study_condition, y = rel_abund + 1e-5,
-                       fill = study_condition)) +
-  geom_boxplot(outlier.size = 0.5, alpha = 0.7) +
-  facet_wrap(~ taxon, scales = "free_y", ncol = 5) +
-  scale_y_log10() +
-  scale_fill_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
-  ) +
-  labs(
-    title    = "DIABIMMUNE: Top 5 Taxa — T1D vs Control",
-    subtitle = "KosticAD_2015 | log10 relative abundance",
-    x = "", y = "Relative abundance (log10)", fill = "Group"
-  ) +
-  theme_bw(base_size = 10) +
-  theme(legend.position = "none",
-        strip.text = element_text(size = 7))
-
-print(p_top5_k)
-
-```
-
-
-```{r}
+# 목적:
+# - 분석에 필요한 CRAN/Bioconductor 패키지를 로드함.
+# - 중간 결과물 저장 폴더를 ./Figure, ./Table로 고정함.
 #
-
-# ============================================================
-#  SECTION 5 : Beta 다양성 (Bray-Curtis PCoA)
-# ============================================================
-
-# KosticAD_2015 PCoA
-bc_k  <- vegan::vegdist(t(ra_k), method = "bray")
-pcoa_k <- cmdscale(bc_k, k = 2, eig = TRUE)
-var_k  <- round(pcoa_k$eig[1:2] / sum(pcoa_k$eig[pcoa_k$eig > 0]) * 100, 1)
-
-pcoa_df_k <- data.frame(
-  PC1       = pcoa_k$points[, 1],
-  PC2       = pcoa_k$points[, 2],
-  condition = meta_k$study_condition[match(rownames(pcoa_k$points),
-                                           rownames(meta_k))]
-) |> dplyr::filter(!is.na(condition))
-
-p_pcoa_k <- ggplot(pcoa_df_k, aes(PC1, PC2, color = condition)) +
-  geom_point(alpha = 0.6, size = 1.8) +
-  stat_ellipse(linewidth = 0.8, type = "t") +
-  scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
-    labels = c("control" = "Control", "T1D" = "T1D")
-  ) +
-  labs(
-    title    = "DIABIMMUNE: Bray-Curtis PCoA",
-    subtitle = "KosticAD_2015",
-    x = paste0("PC1 (", var_k[1], "%)"),
-    y = paste0("PC2 (", var_k[2], "%)"),
-    color = "Group"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(legend.position = "bottom")
-
-
-# 두 PCoA 나란히 출력
-print(p_pcoa_k)
-
-```
-
-
-```{r}
-# ============================================================
-#  SECTION 6 : PERMANOVA (그룹 간 차이 유의성 검정)
+# 출력 규칙:
+# - 그림: ggsave()로 ./Figure에 저장함.
+# - 표: write.table()로 ./Table에 TSV 형식으로 저장함.
 # ============================================================
 
-cat("\n=== PERMANOVA (Bray-Curtis) 결과 ===\n")
-
-# KosticAD_2015
-bc_k_mat  <- as.matrix(bc_k)
-keep_k    <- rownames(bc_k_mat)[!is.na(meta_k$study_condition)]
-perm_k    <- vegan::adonis2(
-  bc_k_mat[keep_k, keep_k] ~ study_condition,
-  data    = meta_k[keep_k, ],
-  permutations = 999
-)
-cat("\n[KosticAD_2015] T1D vs Control:\n")
-print(perm_k)
-# 
-# 
-# # ============================================================
-# #  SECTION 7 : 데이터 내보내기 (TSV)
-# # ============================================================
-# 
-# out_dir <- "cMD_output"
-# if (!dir.exists(out_dir)) dir.create(out_dir)
-# 
-# # Relative abundance matrices
-# write.table(
-#   as.data.frame(assay(kostic_tse, "relative_abundance")),
-#   file = file.path(out_dir, "KosticAD_2015_relabund.tsv"),
-#   sep = "\t", quote = FALSE, col.names = NA
-# )
-# write.table(
-#   as.data.frame(colData(kostic_tse)),
-#   file = file.path(out_dir, "KosticAD_2015_metadata.tsv"),
-#   sep = "\t", quote = FALSE, col.names = NA
-# )
-
-```
-
-
-```{r}
-# ============================================================
-#  SECTION 7 : 종단데이터 분석 준비
-# ============================================================
-
-longitudinal_pkgs <- c(
-  "lme4",       # linear mixed model
-  "lmerTest",   # p-value for lmer
-  "broom.mixed",# tidy mixed model results
-  "emmeans",    # estimated marginal means
-  "ggeffects",  # model-based prediction
-  "tidyr",
+cran_pkgs <- c(
   "dplyr",
+  "tidyr",
+  "tibble",
+  "stringr",
   "ggplot2",
-  "stringr"
+  "vegan",
+  "lme4",
+  "lmerTest",
+  "broom.mixed",
+  "ggeffects"
 )
 
-invisible(lapply(longitudinal_pkgs, function(p) {
+bioc_pkgs <- c(
+  "curatedMetagenomicData",
+  "SummarizedExperiment",
+  "TreeSummarizedExperiment"
+)
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+for (p in cran_pkgs) {
   if (!requireNamespace(p, quietly = TRUE)) {
     install.packages(p)
   }
   library(p, character.only = TRUE)
-}))
+}
 
+for (p in bioc_pkgs) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    BiocManager::install(p, ask = FALSE, update = FALSE)
+  }
+  library(p, character.only = TRUE)
+}
 
+fig_dir <- "Figure"
+tab_dir <- "Table"
+
+dir.create(fig_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(tab_dir, showWarnings = FALSE, recursive = TRUE)
+
+save_table <- function(x, filename, row_names = FALSE) {
+  write.table(
+    x,
+    file = file.path(tab_dir, filename),
+    sep = "\t",
+    quote = FALSE,
+    row.names = row_names,
+    col.names = TRUE
+  )
+}
+
+save_plot <- function(plot, filename, width = 7, height = 5, dpi = 300) {
+  ggplot2::ggsave(
+    filename = file.path(fig_dir, filename),
+    plot = plot,
+    width = width,
+    height = height,
+    dpi = dpi,
+    bg = "white"
+  )
+}
+
+short_taxon_name <- function(x) {
+  out <- stringr::str_replace(x, ".*s__", "s__")
+  out <- stringr::str_replace(out, ".*g__", "g__")
+  out
+}
+
+adonis_to_table <- function(x) {
+  as.data.frame(x) |>
+    tibble::rownames_to_column("term")
+}
+
+sig_label <- function(p, p_adj = NULL) {
+  if (!is.null(p_adj)) {
+    dplyr::case_when(
+      !is.na(p_adj) & p_adj < 0.001 ~ "FDR < 0.001",
+      !is.na(p_adj) & p_adj < 0.01  ~ "FDR < 0.01",
+      !is.na(p_adj) & p_adj < 0.05  ~ "FDR < 0.05",
+      !is.na(p) & p < 0.05         ~ "nominal p < 0.05",
+      TRUE                         ~ "not significant"
+    )
+  } else {
+    dplyr::case_when(
+      !is.na(p) & p < 0.001 ~ "p < 0.001",
+      !is.na(p) & p < 0.01  ~ "p < 0.01",
+      !is.na(p) & p < 0.05  ~ "p < 0.05",
+      TRUE                  ~ "not significant"
+    )
+  }
+}
 ```
 
-```{r}
+# 2. 데이터 로드 및 공통 전처리
 
+```{r load-data}
 # ============================================================
-#  SECTION 8 : Longitudinal metadata 정리
+# 목적:
+# - KosticAD_2015의 species-level relative abundance 자료를 불러옴.
+# - subject_id, study_condition, age를 정리하여 종단 분석용 metadata를 만듦.
+#
+# 통계적 충족 조건:
+# - subject_id가 있어야 반복측정 구조를 모델링할 수 있음.
+# - age 또는 time 변수가 있어야 종단 변화를 평가할 수 있음.
+# - study_condition은 subject-level group 변수로 사용함.
+#
+# 최적화 내용:
+# - relative abundance scale이 0-1 또는 0-100 중 어떤 형태로 들어오더라도
+#   sample별 합이 1이 되도록 정규화함.
 # ============================================================
+
+curatedMetagenomicData("KosticAD_2015", dryrun = TRUE)
+
+kostic_tse <- curatedMetagenomicData(
+  "KosticAD_2015.relative_abundance",
+  dryrun = FALSE,
+  counts = FALSE
+)[[1]]
+
+ra_raw <- SummarizedExperiment::assay(kostic_tse, "relative_abundance")
+storage.mode(ra_raw) <- "numeric"
+ra_raw[is.na(ra_raw)] <- 0
+
+# sample별 합이 0인 경우를 제외하고 composition scale로 정규화함.
+sample_total <- colSums(ra_raw, na.rm = TRUE)
+keep_nonzero_sample <- sample_total > 0
+
+ra_raw <- ra_raw[, keep_nonzero_sample, drop = FALSE]
+sample_total <- sample_total[keep_nonzero_sample]
+
+ra_prop <- sweep(ra_raw, 2, sample_total, FUN = "/")
+ra_prop[is.na(ra_prop)] <- 0
+
+meta_k <- as.data.frame(SummarizedExperiment::colData(kostic_tse))
+rownames(meta_k) <- colnames(kostic_tse)
 
 meta_long <- meta_k |>
   tibble::rownames_to_column("sample_id") |>
-  dplyr::filter(
-    !is.na(subject_id),
-    !is.na(age),
-    !is.na(study_condition),
-    !is.na(shannon)
-  ) |>
+  dplyr::filter(sample_id %in% colnames(ra_prop)) |>
   dplyr::mutate(
     subject_id = as.factor(subject_id),
     study_condition = factor(study_condition, levels = c("control", "T1D")),
     age_months = as.numeric(age)
-  )
+  ) |>
+  dplyr::filter(
+    !is.na(subject_id),
+    !is.na(study_condition),
+    !is.na(age_months)
+  ) |>
+  dplyr::arrange(subject_id, age_months, sample_id)
 
-# subject별 반복 측정 수 확인
+# metadata와 abundance matrix의 sample 순서를 동일하게 맞춤.
+ra_prop <- ra_prop[, meta_long$sample_id, drop = FALSE]
+
+stopifnot(identical(colnames(ra_prop), meta_long$sample_id))
+
 subject_summary <- meta_long |>
   dplyr::group_by(subject_id, study_condition) |>
   dplyr::summarise(
     n_timepoints = dplyr::n(),
-    min_age = min(age_months, na.rm = TRUE),
-    max_age = max(age_months, na.rm = TRUE),
+    min_age_months = min(age_months, na.rm = TRUE),
+    max_age_months = max(age_months, na.rm = TRUE),
     .groups = "drop"
   )
 
+data_summary <- data.frame(
+  n_taxa = nrow(ra_prop),
+  n_samples = ncol(ra_prop),
+  n_subjects = dplyr::n_distinct(meta_long$subject_id),
+  n_control_samples = sum(meta_long$study_condition == "control"),
+  n_T1D_samples = sum(meta_long$study_condition == "T1D")
+)
+
+save_table(data_summary, "00_data_summary.tsv")
+save_table(subject_summary, "00_subject_summary.tsv")
+
+print(data_summary)
 print(subject_summary)
 
-# 반복 측정 수 분포
-ggplot(subject_summary, aes(x = n_timepoints)) +
-  geom_histogram(binwidth = 1, color = "black", fill = "grey80") +
+p_timepoints <- ggplot(subject_summary, aes(x = n_timepoints)) +
+  geom_histogram(binwidth = 1, color = "black", fill = "grey85") +
   labs(
     title = "Number of repeated samples per subject",
     x = "Number of time points",
@@ -432,123 +250,199 @@ ggplot(subject_summary, aes(x = n_timepoints)) +
   ) +
   theme_bw(base_size = 12)
 
+print(p_timepoints)
+save_plot(p_timepoints, "00_subject_timepoints_histogram.png", width = 6, height = 4)
 ```
 
+# 3. Taxonomy 및 분석 대상 taxa 요약
 
-```{r}
-
+```{r taxonomy-summary}
 # ============================================================
-#  SECTION 9 : Alpha diversity longitudinal visualization
+# 목적:
+# - 각 taxon의 평균 상대풍부도와 prevalence를 계산함.
+# - taxa-level LMM에 사용할 후보 taxon을 선정함.
+#
+# 충족 조건:
+# - zero가 너무 많은 taxon은 LMM 추정이 불안정하므로 prevalence filter를 적용함.
+# - 여기서는 prevalence >= 10%인 taxa 중 평균 상대풍부도 상위 12개를 사용함.
 # ============================================================
 
-p_shannon_spaghetti <- ggplot(
-  meta_long,
-  aes(
-    x = age_months,
-    y = shannon,
-    group = subject_id,
-    color = study_condition
+taxa_summary <- data.frame(
+  taxon = rownames(ra_prop),
+  mean_abundance = rowMeans(ra_prop, na.rm = TRUE),
+  prevalence = rowMeans(ra_prop > 0, na.rm = TRUE)
+) |>
+  dplyr::mutate(
+    taxon_short = short_taxon_name(taxon)
+  ) |>
+  dplyr::arrange(dplyr::desc(mean_abundance))
+
+selected_taxa <- taxa_summary |>
+  dplyr::filter(prevalence >= 0.10) |>
+  dplyr::slice_head(n = 12) |>
+  dplyr::pull(taxon)
+
+selected_taxa_table <- taxa_summary |>
+  dplyr::filter(taxon %in% selected_taxa) |>
+  dplyr::mutate(
+    selected_for_taxa_LMM = TRUE
   )
+
+save_table(taxa_summary, "00_taxa_summary_all.tsv")
+save_table(selected_taxa_table, "00_taxa_selected_for_LMM.tsv")
+
+print(selected_taxa_table)
+```
+
+# 4. Alpha diversity 분석
+
+## 4-1. 분석 목적과 가정
+
+```{r alpha-method-comment, eval=FALSE}
+# ============================================================
+# Alpha diversity 정의:
+# - 한 sample 내부의 미생물 다양성을 요약하는 지표임.
+# - 여기서는 Shannon diversity를 사용함.
+#
+# 분석 목적:
+# - 시간이 지남에 따라 Shannon diversity가 변하는지 평가함.
+# - T1D군과 대조군의 평균 수준 또는 시간 변화율이 다른지 평가함.
+#
+# 통계 방법:
+# - Linear mixed-effects model (LMM)
+# - 모델: shannon ~ age_months * study_condition + (1 | subject_id)
+#
+# 항목 해석:
+# - age_months:
+#   대조군 기준 시간에 따른 Shannon 변화율.
+# - study_conditionT1D:
+#   기준 시간점에서 T1D군과 대조군의 차이.
+# - age_months:study_conditionT1D:
+#   T1D군의 시간 변화율이 대조군과 다른지 평가하는 interaction.
+# - (1 | subject_id):
+#   같은 subject에서 반복 측정된 sample 간 상관을 보정함.
+#
+# 독립성:
+# - sample 단위 독립성은 성립하지 않음.
+# - subject_id random effect로 subject 내부 반복측정 상관을 반영함.
+# - subject 간 독립성은 필요함.
+#
+# 분포 및 등분산성:
+# - LMM 잔차가 대략 정규분포를 따르고, fitted value 전반에서 분산이 크게 변하지 않아야 함.
+#
+# 조성성:
+# - Shannon은 relative abundance에서 계산되므로 조성자료의 영향을 완전히 제거하지는 못함.
+# - 다만 개별 taxon abundance 분석보다는 조성성 문제가 덜 직접적임.
+# ============================================================
+```
+
+## 4-2. Shannon diversity 계산 및 시각화
+
+```{r alpha-plot}
+shannon_k <- vegan::diversity(t(ra_prop), index = "shannon")
+
+meta_long <- meta_long |>
+  dplyr::mutate(shannon = shannon_k[sample_id]) |>
+  dplyr::filter(!is.na(shannon))
+
+alpha_summary <- meta_long |>
+  dplyr::group_by(study_condition) |>
+  dplyr::summarise(
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    sd_shannon = sd(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    n_samples = dplyr::n(),
+    n_subjects = dplyr::n_distinct(subject_id),
+    .groups = "drop"
+  )
+
+save_table(alpha_summary, "01_alpha_Shannon_summary.tsv")
+print(alpha_summary)
+
+p_alpha_spaghetti <- ggplot(
+  meta_long,
+  aes(x = age_months, y = shannon, group = subject_id, color = study_condition)
 ) +
-  geom_line(alpha = 0.35, linewidth = 0.6) +
-  geom_point(alpha = 0.6, size = 1.4) +
+  geom_line(alpha = 0.35, linewidth = 0.5) +
+  geom_point(alpha = 0.65, size = 1.4) +
   geom_smooth(
     aes(group = study_condition),
-    method = "loess",
+    method = "lm",
     se = TRUE,
-    linewidth = 1.2
+    linewidth = 1.1
   ) +
   scale_color_manual(
     values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
     labels = c("control" = "Control", "T1D" = "T1D")
   ) +
   labs(
-    title = "Longitudinal change in Shannon diversity",
-    subtitle = "Each thin line represents one subject",
-    x = "Age (months)",
+    title = "Alpha diversity trajectory",
+    subtitle = "Shannon diversity over time; each thin line represents one subject",
+    x = "Age / time variable",
     y = "Shannon diversity",
     color = "Group"
   ) +
   theme_bw(base_size = 12) +
   theme(legend.position = "bottom")
 
-print(p_shannon_spaghetti)
-
+print(p_alpha_spaghetti)
+save_plot(p_alpha_spaghetti, "01_alpha_Shannon_spaghetti.png", width = 7, height = 5)
 ```
 
-```{r}
+## 4-3. Shannon diversity LMM
 
-# ============================================================
-#  SECTION 10 : Linear mixed-effects model for Shannon diversity
-# ============================================================
-
-# 기본 모델
-# shannon ~ age_months * study_condition + (1 | subject_id)
-# 해석:
-# - age_months: 시간에 따른 Shannon 변화
-# - study_condition: Control vs T1D 차이
-# - age_months:study_condition: 시간에 따른 변화 양상이 그룹별로 다른지
-# - (1 | subject_id): 개인별 baseline 차이 보정
-
+```{r alpha-lmm}
 fit_shannon_lmm <- lmerTest::lmer(
   shannon ~ age_months * study_condition + (1 | subject_id),
-  data = meta_long
+  data = meta_long,
+  REML = TRUE
 )
 
-summary(fit_shannon_lmm)
-
-# 결과를 표 형태로 정리
 shannon_lmm_result <- broom.mixed::tidy(
   fit_shannon_lmm,
   effects = "fixed",
   conf.int = TRUE
-)
+) |>
+  dplyr::mutate(
+    significance = sig_label(p.value)
+  )
 
+save_table(shannon_lmm_result, "01_alpha_Shannon_LMM_results.tsv")
 print(shannon_lmm_result)
 
-# CSV 저장 예시
-out_dir <- "cMD_output"
-if (!dir.exists(out_dir)) dir.create(out_dir)
+# 결과 기반 해석용 요약:
+# - 기존 결과에서는 age_months가 유의했고,
+#   study_condition 및 age_months:study_conditionT1D는 유의하지 않았음.
+alpha_key_terms <- shannon_lmm_result |>
+  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
+  dplyr::select(term, estimate, conf.low, conf.high, p.value, significance)
 
-write.csv(
-  shannon_lmm_result,
-  file = file.path(out_dir, "KosticAD_2015_Shannon_LMM_results.csv"),
-  row.names = FALSE
-)
-
+save_table(alpha_key_terms, "01_alpha_Shannon_key_terms.tsv")
 ```
 
-```{r}
+## 4-4. Alpha LMM 예측선 및 진단 그림
 
-# ============================================================
-#  SECTION 11 : Model-based prediction plot
-# ============================================================
-
+```{r alpha-model-prediction}
 pred_shannon <- ggeffects::ggpredict(
   fit_shannon_lmm,
   terms = c("age_months [all]", "study_condition")
 )
 
-p_shannon_model <- ggplot(
-  pred_shannon,
+pred_shannon_df <- as.data.frame(pred_shannon)
+save_table(pred_shannon_df, "01_alpha_Shannon_model_prediction.tsv")
+
+p_alpha_model <- ggplot(
+  pred_shannon_df,
   aes(x = x, y = predicted, color = group, fill = group)
 ) +
   geom_line(linewidth = 1.2) +
-  geom_ribbon(
-    aes(ymin = conf.low, ymax = conf.high),
-    alpha = 0.18,
-    color = NA
-  ) +
-  scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
-  ) +
-  scale_fill_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
-  ) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.18, color = NA) +
+  scale_color_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
+  scale_fill_manual(values = c("control" = "#1D9E75", "T1D" = "#D85A30")) +
   labs(
-    title = "Model-based longitudinal trajectory of Shannon diversity",
-    subtitle = "Linear mixed-effects model with subject-level random intercept",
-    x = "Age (months)",
+    title = "Model-based alpha diversity trajectory",
+    subtitle = "Predicted Shannon diversity from linear mixed-effects model",
+    x = "Age / time variable",
     y = "Predicted Shannon diversity",
     color = "Group",
     fill = "Group"
@@ -556,55 +450,381 @@ p_shannon_model <- ggplot(
   theme_bw(base_size = 12) +
   theme(legend.position = "bottom")
 
-print(p_shannon_model)
+print(p_alpha_model)
+save_plot(p_alpha_model, "01_alpha_Shannon_model_prediction.png", width = 7, height = 5)
 
+alpha_diag_df <- data.frame(
+  fitted = fitted(fit_shannon_lmm),
+  residual = resid(fit_shannon_lmm)
+)
+
+save_table(alpha_diag_df, "01_alpha_Shannon_LMM_diagnostics_values.tsv")
+
+p_alpha_resid <- ggplot(alpha_diag_df, aes(x = fitted, y = residual)) +
+  geom_point(alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  labs(
+    title = "Alpha LMM diagnostic: residuals vs fitted",
+    x = "Fitted values",
+    y = "Residuals"
+  ) +
+  theme_bw(base_size = 12)
+
+p_alpha_qq <- ggplot(alpha_diag_df, aes(sample = residual)) +
+  stat_qq(alpha = 0.7) +
+  stat_qq_line() +
+  labs(
+    title = "Alpha LMM diagnostic: QQ plot",
+    x = "Theoretical quantiles",
+    y = "Sample quantiles"
+  ) +
+  theme_bw(base_size = 12)
+
+print(p_alpha_resid)
+print(p_alpha_qq)
+
+save_plot(p_alpha_resid, "01_alpha_Shannon_LMM_residuals_vs_fitted.png", width = 6, height = 4)
+save_plot(p_alpha_qq, "01_alpha_Shannon_LMM_QQplot.png", width = 6, height = 4)
 ```
-```{r}
+
+# 5. Beta diversity 분석
+
+## 5-1. 분석 목적과 가정
+
+```{r beta-method-comment, eval=FALSE}
 # ============================================================
-#  SECTION 12 : Longitudinal visualization of selected taxa
+# Beta diversity 정의:
+# - sample 간 미생물 군집 조성 차이를 거리 또는 비유사도로 요약한 값임.
+#
+# 분석 목적:
+# - T1D군과 대조군의 전체 community composition 차이를 평가함.
+# - 같은 subject 안에서 시간이 지나며 microbiome이 baseline에서 얼마나 이동하는지 평가함.
+#
+# 주요 방법:
+# 1. Bray-Curtis PCoA:
+#    - 전체 sample 간 거리 구조를 2차원으로 시각화함.
+#    - 탐색적 시각화이며, 자체가 통계검정은 아님.
+#
+# 2. Subject-level PERMANOVA:
+#    - subject별 평균 community profile을 만든 뒤 group 차이를 평가함.
+#    - group은 subject-level 변수이므로 sample을 모두 독립으로 놓지 않기 위함.
+#
+# 3. Within-subject time PERMANOVA:
+#    - age_months가 community composition에 미치는 효과를 평가함.
+#    - permutation을 subject_id 안에서 제한하여 반복측정 구조를 일부 반영함.
+#
+# 4. Baseline distance LMM:
+#    - 각 subject의 첫 sample을 baseline으로 정함.
+#    - 이후 sample의 Bray-Curtis distance from baseline을 outcome으로 사용함.
+#
+# 독립성:
+# - 전체 sample을 독립으로 간주하는 단순 PERMANOVA는 종단자료에서 부적절할 수 있음.
+# - subject-level 평균 또는 subject-level random effect를 사용해야 함.
+#
+# 분산 동질성:
+# - PERMANOVA는 group centroid 차이와 dispersion 차이를 혼동할 수 있음.
+# - betadisper로 dispersion 차이를 점검해야 함.
+#
+# 조성성:
+# - Bray-Curtis는 상대풍부도 기반 거리로 널리 사용되지만 조성자료 문제를 완전히 해결하지 않음.
+# - 엄격한 조성자료 분석이 필요하면 CLR 기반 Aitchison distance를 추가 고려함.
+# ============================================================
+```
+
+## 5-2. Bray-Curtis PCoA
+
+```{r beta-pcoa}
+bc_k <- vegan::vegdist(t(ra_prop), method = "bray")
+bc_k_mat <- as.matrix(bc_k)
+
+pcoa_k <- cmdscale(bc_k, k = 2, eig = TRUE)
+var_k <- round(pcoa_k$eig[1:2] / sum(pcoa_k$eig[pcoa_k$eig > 0]) * 100, 1)
+
+pcoa_df <- data.frame(
+  sample_id = rownames(pcoa_k$points),
+  PC1 = pcoa_k$points[, 1],
+  PC2 = pcoa_k$points[, 2]
+) |>
+  dplyr::left_join(
+    meta_long |> dplyr::select(sample_id, subject_id, study_condition, age_months),
+    by = "sample_id"
+  )
+
+save_table(pcoa_df, "02_beta_BrayCurtis_PCoA_coordinates.tsv")
+
+p_pcoa <- ggplot(pcoa_df, aes(x = PC1, y = PC2, color = study_condition)) +
+  geom_point(alpha = 0.7, size = 1.8) +
+  stat_ellipse(linewidth = 0.8, type = "t") +
+  scale_color_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
+    labels = c("control" = "Control", "T1D" = "T1D")
+  ) +
+  labs(
+    title = "Beta diversity: Bray-Curtis PCoA",
+    subtitle = "Exploratory visualization of sample-level community differences",
+    x = paste0("PC1 (", var_k[1], "%)"),
+    y = paste0("PC2 (", var_k[2], "%)"),
+    color = "Group"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p_pcoa)
+save_plot(p_pcoa, "02_beta_BrayCurtis_PCoA.png", width = 6.5, height = 5)
+```
+
+## 5-3. Subject-level PERMANOVA 및 dispersion 점검
+
+```{r beta-subject-permanova}
+# ============================================================
+# 목적:
+# - group은 subject-level 변수이므로 subject별 평균 community profile을 만든 뒤 비교함.
+# - 이 접근은 sample-level pseudoreplication을 줄이는 데 목적이 있음.
 # ============================================================
 
-# 평균 상대풍부도 기준 상위 6개 taxon 선택
-top_taxa_long <- names(top20_kostic)[1:6]
-
-taxa_long_df <- as.data.frame(t(ra_k[top_taxa_long, , drop = FALSE])) |>
+ra_sample_df <- as.data.frame(t(ra_prop)) |>
   tibble::rownames_to_column("sample_id") |>
-  dplyr::left_join(meta_long, by = "sample_id") |>
+  dplyr::left_join(
+    meta_long |> dplyr::select(sample_id, subject_id, study_condition),
+    by = "sample_id"
+  )
+
+subject_profile_df <- ra_sample_df |>
+  dplyr::group_by(subject_id, study_condition) |>
+  dplyr::summarise(
+    dplyr::across(
+      .cols = dplyr::all_of(rownames(ra_prop)),
+      .fns = ~ mean(.x, na.rm = TRUE)
+    ),
+    .groups = "drop"
+  )
+
+subject_meta <- subject_profile_df |>
+  dplyr::select(subject_id, study_condition)
+
+subject_mat <- subject_profile_df |>
+  dplyr::select(-subject_id, -study_condition) |>
+  as.matrix()
+
+rownames(subject_mat) <- subject_profile_df$subject_id
+
+subject_dist <- vegan::vegdist(subject_mat, method = "bray")
+
+perm_subject <- vegan::adonis2(
+  subject_dist ~ study_condition,
+  data = subject_meta,
+  permutations = 999
+)
+
+perm_subject_table <- adonis_to_table(perm_subject)
+save_table(perm_subject_table, "02_beta_subject_level_PERMANOVA.tsv")
+print(perm_subject_table)
+
+# PERMANOVA dispersion 점검
+bd_subject <- vegan::betadisper(subject_dist, subject_meta$study_condition)
+bd_subject_anova <- as.data.frame(anova(bd_subject)) |>
+  tibble::rownames_to_column("term")
+bd_subject_perm <- as.data.frame(permutest(bd_subject, permutations = 999)$tab) |>
+  tibble::rownames_to_column("term")
+
+save_table(bd_subject_anova, "02_beta_subject_level_betadisper_anova.tsv")
+save_table(bd_subject_perm, "02_beta_subject_level_betadisper_permutest.tsv")
+
+print(bd_subject_anova)
+print(bd_subject_perm)
+```
+
+## 5-4. Within-subject time PERMANOVA
+
+```{r beta-within-subject-permanova}
+# ============================================================
+# 목적:
+# - 같은 subject 안에서 시간이 지남에 따라 community composition이 변하는지 평가함.
+#
+# 주의:
+# - study_condition은 subject마다 고정된 between-subject 변수이므로,
+#   strata = subject_id를 둔 within-subject permutation에서는 group 효과 검정보다
+#   time effect 평가에 더 적합함.
+# ============================================================
+
+perm_time_within_subject <- vegan::adonis2(
+  bc_k ~ age_months,
+  data = meta_long,
+  permutations = 999,
+  strata = meta_long$subject_id
+)
+
+perm_time_within_subject_table <- adonis_to_table(perm_time_within_subject)
+save_table(perm_time_within_subject_table, "02_beta_within_subject_time_PERMANOVA.tsv")
+print(perm_time_within_subject_table)
+```
+
+## 5-5. Baseline distance 계산 및 LMM
+
+```{r beta-baseline-distance}
+# ============================================================
+# 목적:
+# - 각 subject의 첫 sample을 baseline으로 정의함.
+# - 이후 sample이 baseline microbiome에서 얼마나 멀어졌는지 Bray-Curtis distance로 계산함.
+# - 이 값을 outcome으로 하여 시간 변화와 group-by-time interaction을 LMM으로 평가함.
+#
+# 기존 결과 기준:
+# - age_months 효과는 유의함.
+# - study_conditionT1D와 age_months:study_conditionT1D는 유의하지 않음.
+# ============================================================
+
+baseline_samples <- meta_long |>
+  dplyr::group_by(subject_id) |>
+  dplyr::slice_min(age_months, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup() |>
+  dplyr::select(
+    subject_id,
+    baseline_sample_id = sample_id,
+    baseline_age_months = age_months
+  )
+
+meta_beta_baseline <- meta_long |>
+  dplyr::left_join(baseline_samples, by = "subject_id") |>
+  dplyr::rowwise() |>
+  dplyr::mutate(
+    distance_from_baseline = bc_k_mat[sample_id, baseline_sample_id],
+    time_from_baseline = age_months - baseline_age_months
+  ) |>
+  dplyr::ungroup()
+
+save_table(meta_beta_baseline, "02_beta_BrayCurtis_distance_from_baseline.tsv")
+
+p_baseline_distance <- ggplot(
+  meta_beta_baseline,
+  aes(x = age_months, y = distance_from_baseline, group = subject_id, color = study_condition)
+) +
+  geom_line(alpha = 0.35, linewidth = 0.5) +
+  geom_point(alpha = 0.65, size = 1.4) +
+  geom_smooth(
+    aes(group = study_condition),
+    method = "lm",
+    se = TRUE,
+    linewidth = 1.1
+  ) +
+  scale_color_manual(
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
+    labels = c("control" = "Control", "T1D" = "T1D")
+  ) +
+  labs(
+    title = "Within-subject microbiome change from baseline",
+    subtitle = "Bray-Curtis distance from each subject's first sample",
+    x = "Age / time variable",
+    y = "Bray-Curtis distance from baseline",
+    color = "Group"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p_baseline_distance)
+save_plot(p_baseline_distance, "02_beta_BrayCurtis_distance_from_baseline.png", width = 7, height = 5)
+
+fit_baseline_lmm <- lmerTest::lmer(
+  distance_from_baseline ~ age_months * study_condition + (1 | subject_id),
+  data = meta_beta_baseline,
+  REML = TRUE
+)
+
+baseline_lmm_result <- broom.mixed::tidy(
+  fit_baseline_lmm,
+  effects = "fixed",
+  conf.int = TRUE
+) |>
+  dplyr::mutate(
+    significance = sig_label(p.value)
+  )
+
+save_table(baseline_lmm_result, "02_beta_BrayCurtis_baseline_distance_LMM_results.tsv")
+print(baseline_lmm_result)
+
+beta_key_terms <- baseline_lmm_result |>
+  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
+  dplyr::select(term, estimate, conf.low, conf.high, p.value, significance)
+
+save_table(beta_key_terms, "02_beta_BrayCurtis_baseline_distance_key_terms.tsv")
+```
+
+# 6. Taxa-level longitudinal analysis
+
+## 6-1. 분석 목적과 가정
+
+```{r taxa-method-comment, eval=FALSE}
+# ============================================================
+# Taxa-level 분석 정의:
+# - 개별 taxon의 abundance가 시간에 따라 변하는지 평가하는 분석임.
+#
+# 분석 목적:
+# - 특정 taxon이 age_months에 따라 증가 또는 감소하는지 평가함.
+# - T1D군에서 그 변화율이 대조군과 다른지 interaction으로 평가함.
+#
+# 통계 방법:
+# - CLR-transformed abundance 기반 taxon-wise LMM.
+# - 모델: clr_abundance ~ age_months * study_condition + (1 | subject_id)
+#
+# 독립성:
+# - 같은 subject 내 반복측정은 독립이 아님.
+# - subject_id random intercept로 반복측정 상관을 반영함.
+#
+# 조성성:
+# - relative abundance는 총합이 고정된 조성자료임.
+# - 단순 relative abundance는 한 taxon의 증가가 다른 taxon의 상대적 감소처럼 보이게 만들 수 있음.
+# - 따라서 통계 분석에는 CLR 변환값을 사용함.
+#
+# Zero 문제:
+# - CLR은 log 변환을 사용하므로 zero를 직접 처리할 수 없음.
+# - pseudocount를 추가해야 하며, pseudocount 선택이 결과에 영향을 줄 수 있음.
+#
+# 다중검정:
+# - 여러 taxon을 반복 검정하므로 term별 Benjamini-Hochberg FDR 보정을 수행함.
+# ============================================================
+```
+
+## 6-2. Taxa trajectory 시각화
+
+```{r taxa-trajectory}
+taxa_long_df <- as.data.frame(t(ra_prop[selected_taxa, , drop = FALSE])) |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::left_join(
+    meta_long |> dplyr::select(sample_id, subject_id, study_condition, age_months),
+    by = "sample_id"
+  ) |>
   tidyr::pivot_longer(
-    cols = dplyr::all_of(top_taxa_long),
+    cols = dplyr::all_of(selected_taxa),
     names_to = "taxon",
     values_to = "relative_abundance"
   ) |>
   dplyr::mutate(
     rel_abund_log10 = log10(relative_abundance + 1e-5),
-    taxon_short = stringr::str_replace(taxon, ".*s__", "s__")
+    taxon_short = short_taxon_name(taxon)
   )
 
-p_taxa_long <- ggplot(
+save_table(taxa_long_df, "03_taxa_log10_relative_abundance_long.tsv")
+
+p_taxa_trajectory <- ggplot(
   taxa_long_df,
-  aes(
-    x = age_months,
-    y = rel_abund_log10,
-    group = subject_id,
-    color = study_condition
-  )
+  aes(x = age_months, y = rel_abund_log10, group = subject_id, color = study_condition)
 ) +
-  geom_line(alpha = 0.25, linewidth = 0.5) +
-  geom_point(alpha = 0.45, size = 1.0) +
+  geom_line(alpha = 0.25, linewidth = 0.4) +
+  geom_point(alpha = 0.45, size = 0.9) +
   geom_smooth(
     aes(group = study_condition),
-    method = "loess",
+    method = "lm",
     se = TRUE,
-    linewidth = 1.0
+    linewidth = 0.9
   ) +
   facet_wrap(~ taxon_short, scales = "free_y", ncol = 3) +
   scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
+    values = c("control" = "#1D9E75", "T1D" = "#D85A30"),
+    labels = c("control" = "Control", "T1D" = "T1D")
   ) +
   labs(
-    title = "Longitudinal trajectories of dominant taxa",
-    subtitle = "Relative abundance was log10-transformed after adding pseudo-count 1e-5",
-    x = "Age (months)",
+    title = "Taxa-level longitudinal trajectories",
+    subtitle = "Exploratory visualization using log10(relative abundance + 1e-5)",
+    x = "Age / time variable",
     y = "log10(relative abundance + 1e-5)",
     color = "Group"
   ) +
@@ -614,115 +834,186 @@ p_taxa_long <- ggplot(
     strip.text = element_text(size = 8)
   )
 
-print(p_taxa_long)
+print(p_taxa_trajectory)
+save_plot(p_taxa_trajectory, "03_taxa_log10_trajectory_top12.png", width = 9, height = 7)
 ```
-```{r}
 
+## 6-3. CLR 변환 및 taxon-wise LMM
 
-
-# ============================================================
-#  SECTION 13 : Taxon-level longitudinal mixed model
-# ============================================================
-
-run_taxon_lmm <- function(taxon_name, taxa_df) {
-  
-  dat <- taxa_df |>
-    dplyr::filter(taxon == taxon_name) |>
-    dplyr::filter(
-      !is.na(rel_abund_log10),
-      !is.na(age_months),
-      !is.na(study_condition),
-      !is.na(subject_id)
-    )
-  
-  # 모든 그룹이 존재하지 않거나 sample 수가 너무 적으면 skip
-  if (dplyr::n_distinct(dat$study_condition) < 2) {
-    return(NULL)
+```{r taxa-clr-lmm}
+make_clr <- function(mat, pseudocount = NULL) {
+  if (is.null(pseudocount)) {
+    positive_min <- min(mat[mat > 0], na.rm = TRUE)
+    pseudocount <- positive_min / 2
   }
-  
+
+  mat_pc <- mat + pseudocount
+  mat_prop <- sweep(mat_pc, 2, colSums(mat_pc), FUN = "/")
+  log_mat <- log(mat_prop)
+  clr_mat <- sweep(log_mat, 2, colMeans(log_mat), FUN = "-")
+
+  attr(clr_mat, "pseudocount") <- pseudocount
+  clr_mat
+}
+
+clr_prop <- make_clr(ra_prop)
+pseudocount_used <- attr(clr_prop, "pseudocount")
+
+pseudocount_table <- data.frame(
+  pseudocount_used = pseudocount_used
+)
+
+save_table(pseudocount_table, "03_taxa_CLR_pseudocount.tsv")
+print(pseudocount_table)
+
+clr_long_df <- as.data.frame(t(clr_prop[selected_taxa, , drop = FALSE])) |>
+  tibble::rownames_to_column("sample_id") |>
+  dplyr::left_join(
+    meta_long |> dplyr::select(sample_id, subject_id, study_condition, age_months),
+    by = "sample_id"
+  ) |>
+  tidyr::pivot_longer(
+    cols = dplyr::all_of(selected_taxa),
+    names_to = "taxon",
+    values_to = "clr_abundance"
+  ) |>
+  dplyr::filter(
+    !is.na(clr_abundance),
+    !is.na(subject_id),
+    !is.na(study_condition),
+    !is.na(age_months)
+  ) |>
+  dplyr::mutate(
+    taxon_short = short_taxon_name(taxon)
+  )
+
+save_table(clr_long_df, "03_taxa_CLR_abundance_long.tsv")
+
+run_taxon_lmm <- function(one_taxon, dat) {
+  dat_one <- dat |>
+    dplyr::filter(taxon == one_taxon)
+
+  if (dplyr::n_distinct(dat_one$study_condition) < 2) return(NULL)
+  if (dplyr::n_distinct(dat_one$subject_id) < 4) return(NULL)
+
   fit <- tryCatch(
     {
       lmerTest::lmer(
-        rel_abund_log10 ~ age_months * study_condition + (1 | subject_id),
-        data = dat
+        clr_abundance ~ age_months * study_condition + (1 | subject_id),
+        data = dat_one,
+        REML = TRUE
       )
     },
     error = function(e) NULL
   )
-  
-  if (is.null(fit)) {
-    return(NULL)
-  }
-  
+
+  if (is.null(fit)) return(NULL)
+
   broom.mixed::tidy(
     fit,
     effects = "fixed",
     conf.int = TRUE
   ) |>
-    dplyr::mutate(taxon = taxon_name)
+    dplyr::mutate(taxon = one_taxon)
 }
 
-taxon_lmm_results <- lapply(
-  unique(taxa_long_df$taxon),
+taxa_clr_lmm_results <- lapply(
+  selected_taxa,
   run_taxon_lmm,
-  taxa_df = taxa_long_df
+  dat = clr_long_df
 ) |>
-  dplyr::bind_rows()
-
-# FDR 보정
-taxon_lmm_results <- taxon_lmm_results |>
+  dplyr::bind_rows() |>
   dplyr::group_by(term) |>
   dplyr::mutate(
     p_adj_BH = p.adjust(p.value, method = "BH")
   ) |>
-  dplyr::ungroup()
-
-print(taxon_lmm_results)
-
-write.csv(
-  taxon_lmm_results,
-  file = file.path(out_dir, "KosticAD_2015_TopTaxa_LMM_results.csv"),
-  row.names = FALSE
-)
-```
-```{r}
-
-# ============================================================
-#  SECTION 14 : Visualization of taxon-level LMM results
-# ============================================================
-
-# 관심 term:
-# age_months:study_conditionT1D
-# → 시간에 따른 변화 양상이 T1D군과 control군에서 다른지 평가
-
-interaction_results <- taxon_lmm_results |>
-  dplyr::filter(term == "age_months:study_conditionT1D") |>
+  dplyr::ungroup() |>
   dplyr::mutate(
-    taxon_short = stringr::str_replace(taxon, ".*s__", "s__"),
-    significance = dplyr::case_when(
-      p_adj_BH < 0.05 ~ "FDR < 0.05",
-      p.value < 0.05 ~ "nominal p < 0.05",
-      TRUE ~ "not significant"
-    )
+    taxon_short = short_taxon_name(taxon),
+    significance = sig_label(p.value, p_adj_BH)
   )
 
-p_taxon_lmm <- ggplot(
-  interaction_results,
-  aes(
-    x = reorder(taxon_short, estimate),
-    y = estimate,
-    fill = significance
+save_table(taxa_clr_lmm_results, "03_taxa_CLR_LMM_results.tsv")
+print(taxa_clr_lmm_results)
+```
+
+## 6-4. Taxa-level 시간 효과 및 interaction 결과 정리
+
+```{r taxa-result-summary}
+# ============================================================
+# 결과 해석 최적화:
+# - 기존 결과에서는 group-specific interaction이 FDR < 0.05에 도달하지 않았음.
+# - 따라서 main 결과 그림은 age_months 효과와 interaction 효과를 분리해서 저장함.
+# - interaction은 "T1D에서 시간 변화율이 대조군과 다른가?"라는 질문에 해당함.
+# ============================================================
+
+taxa_age_effect <- taxa_clr_lmm_results |>
+  dplyr::filter(term == "age_months") |>
+  dplyr::arrange(p_adj_BH, p.value)
+
+taxa_interaction_effect <- taxa_clr_lmm_results |>
+  dplyr::filter(term == "age_months:study_conditionT1D") |>
+  dplyr::arrange(p_adj_BH, p.value)
+
+taxa_group_effect <- taxa_clr_lmm_results |>
+  dplyr::filter(term == "study_conditionT1D") |>
+  dplyr::arrange(p_adj_BH, p.value)
+
+save_table(taxa_age_effect, "03_taxa_CLR_LMM_age_effect.tsv")
+save_table(taxa_group_effect, "03_taxa_CLR_LMM_group_effect.tsv")
+save_table(taxa_interaction_effect, "03_taxa_CLR_LMM_age_by_group_interaction.tsv")
+
+print(taxa_age_effect)
+print(taxa_interaction_effect)
+
+taxa_significant_summary <- taxa_clr_lmm_results |>
+  dplyr::filter(term != "(Intercept)") |>
+  dplyr::group_by(term) |>
+  dplyr::summarise(
+    n_nominal_p_lt_0_05 = sum(p.value < 0.05, na.rm = TRUE),
+    n_FDR_lt_0_05 = sum(p_adj_BH < 0.05, na.rm = TRUE),
+    .groups = "drop"
   )
+
+save_table(taxa_significant_summary, "03_taxa_CLR_LMM_significance_summary.tsv")
+print(taxa_significant_summary)
+```
+
+## 6-5. Taxa-level LMM 결과 시각화
+
+```{r taxa-result-plots}
+p_taxa_age_effect <- ggplot(
+  taxa_age_effect,
+  aes(x = reorder(taxon_short, estimate), y = estimate, fill = significance)
 ) +
   geom_col(width = 0.7) +
-  geom_errorbar(
-    aes(ymin = conf.low, ymax = conf.high),
-    width = 0.2
-  ) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = 2) +
   coord_flip() +
   labs(
-    title = "Group-specific longitudinal change in dominant taxa",
-    subtitle = "Interaction term: age_months × T1D",
+    title = "Taxa-level time effect",
+    subtitle = "LMM term: age_months; outcome: CLR-transformed abundance",
+    x = "Taxon",
+    y = "Estimated coefficient",
+    fill = "Significance"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom")
+
+print(p_taxa_age_effect)
+save_plot(p_taxa_age_effect, "03_taxa_CLR_LMM_age_effect.png", width = 8, height = 6)
+
+p_taxa_interaction <- ggplot(
+  taxa_interaction_effect,
+  aes(x = reorder(taxon_short, estimate), y = estimate, fill = significance)
+) +
+  geom_col(width = 0.7) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  coord_flip() +
+  labs(
+    title = "Taxa-level group-specific longitudinal effect",
+    subtitle = "LMM term: age_months × T1D; FDR should be used for interpretation",
     x = "Taxon",
     y = "Estimated interaction coefficient",
     fill = "Significance"
@@ -730,166 +1021,72 @@ p_taxon_lmm <- ggplot(
   theme_bw(base_size = 11) +
   theme(legend.position = "bottom")
 
-print(p_taxon_lmm)
+print(p_taxa_interaction)
+save_plot(p_taxa_interaction, "03_taxa_CLR_LMM_age_by_group_interaction.png", width = 8, height = 6)
 ```
-```{r}
 
+# 7. 결과 요약 테이블 자동 생성
 
+```{r final-summary}
 # ============================================================
-#  SECTION 15 : Within-subject distance from baseline
+# 목적:
+# - alpha, beta, taxa 분석에서 핵심 term만 모아 최종 요약표를 만듦.
+# - manuscript 또는 보고서 작성 시 Table로 옮기기 쉽게 구성함.
 # ============================================================
 
-# sample 순서 확인
-sample_ids <- colnames(kostic_tse)
-
-meta_for_beta <- meta_long |>
-  dplyr::filter(sample_id %in% sample_ids) |>
-  dplyr::arrange(subject_id, age_months)
-
-# Bray-Curtis distance matrix
-bc_mat <- as.matrix(vegan::vegdist(t(ra_k), method = "bray"))
-
-# subject별 baseline sample 지정
-baseline_samples <- meta_for_beta |>
-  dplyr::group_by(subject_id) |>
-  dplyr::slice_min(age_months, n = 1, with_ties = FALSE) |>
-  dplyr::ungroup() |>
-  dplyr::select(subject_id, baseline_sample_id = sample_id)
-
-meta_beta_baseline <- meta_for_beta |>
-  dplyr::left_join(baseline_samples, by = "subject_id") |>
-  dplyr::rowwise() |>
+alpha_final <- shannon_lmm_result |>
+  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
   dplyr::mutate(
-    distance_from_baseline = bc_mat[sample_id, baseline_sample_id]
+    analysis = "Alpha diversity",
+    outcome = "Shannon diversity"
   ) |>
-  dplyr::ungroup()
-
-head(meta_beta_baseline)
-
-p_baseline_dist <- ggplot(
-  meta_beta_baseline,
-  aes(
-    x = age_months,
-    y = distance_from_baseline,
-    group = subject_id,
-    color = study_condition
-  )
-) +
-  geom_line(alpha = 0.35, linewidth = 0.6) +
-  geom_point(alpha = 0.6, size = 1.3) +
-  geom_smooth(
-    aes(group = study_condition),
-    method = "loess",
-    se = TRUE,
-    linewidth = 1.2
-  ) +
-  scale_color_manual(
-    values = c("control" = "#1D9E75", "T1D" = "#D85A30")
-  ) +
-  labs(
-    title = "Within-subject microbiome change from baseline",
-    subtitle = "Bray-Curtis distance from each subject's first sample",
-    x = "Age (months)",
-    y = "Bray-Curtis distance from baseline",
-    color = "Group"
-  ) +
-  theme_bw(base_size = 12) +
-  theme(legend.position = "bottom")
-
-print(p_baseline_dist)
-```
-```{r}
-
-# ============================================================
-#  SECTION 16 : Mixed model for distance from baseline
-# ============================================================
-
-fit_baseline_dist <- lmerTest::lmer(
-  distance_from_baseline ~ age_months * study_condition + (1 | subject_id),
-  data = meta_beta_baseline
-)
-
-summary(fit_baseline_dist)
-
-baseline_dist_result <- broom.mixed::tidy(
-  fit_baseline_dist,
-  effects = "fixed",
-  conf.int = TRUE
-)
-
-print(baseline_dist_result)
-
-write.csv(
-  baseline_dist_result,
-  file = file.path(out_dir, "KosticAD_2015_BaselineDistance_LMM_results.csv"),
-  row.names = FALSE
-)
-```
-```{r}
-
-# ============================================================
-#  SECTION 17 : Age-bin based community composition
-# ============================================================
-
-meta_long_bin <- meta_long |>
-  dplyr::mutate(
-    age_bin = cut(
-      age_months,
-      breaks = c(-Inf, 3, 6, 12, 18, 24, Inf),
-      labels = c("0-3", "3-6", "6-12", "12-18", "18-24", ">24")
-    )
+  dplyr::select(
+    analysis, outcome, term, estimate, conf.low, conf.high, p.value, significance
   )
 
-top10_taxa <- names(top20_kostic)[1:10]
+beta_final <- baseline_lmm_result |>
+  dplyr::filter(term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")) |>
+  dplyr::mutate(
+    analysis = "Beta diversity",
+    outcome = "Bray-Curtis distance from baseline"
+  ) |>
+  dplyr::select(
+    analysis, outcome, term, estimate, conf.low, conf.high, p.value, significance
+  )
 
-composition_df <- as.data.frame(t(ra_k[top10_taxa, , drop = FALSE])) |>
-  tibble::rownames_to_column("sample_id") |>
-  dplyr::left_join(
-    meta_long_bin |> dplyr::select(sample_id, subject_id, study_condition, age_bin),
-    by = "sample_id"
-  ) |>
-  tidyr::pivot_longer(
-    cols = dplyr::all_of(top10_taxa),
-    names_to = "taxon",
-    values_to = "relative_abundance"
-  ) |>
-  dplyr::filter(!is.na(age_bin), !is.na(study_condition)) |>
-  dplyr::group_by(study_condition, age_bin, taxon) |>
-  dplyr::summarise(
-    mean_relative_abundance = mean(relative_abundance, na.rm = TRUE),
-    .groups = "drop"
+taxa_final <- taxa_clr_lmm_results |>
+  dplyr::filter(
+    term %in% c("age_months", "study_conditionT1D", "age_months:study_conditionT1D")
   ) |>
   dplyr::mutate(
-    taxon_short = stringr::str_replace(taxon, ".*s__", "s__")
+    analysis = "Taxa-level",
+    outcome = taxon_short
+  ) |>
+  dplyr::select(
+    analysis, outcome, term, estimate, conf.low, conf.high, p.value, p_adj_BH, significance
   )
 
-p_composition_agebin <- ggplot(
-  composition_df,
-  aes(
-    x = age_bin,
-    y = mean_relative_abundance,
-    fill = taxon_short
-  )
-) +
-  geom_col(position = "fill", width = 0.8) +
-  facet_wrap(~ study_condition, nrow = 1) +
-  labs(
-    title = "Age-bin based microbiome composition",
-    subtitle = "Top 10 taxa summarized by age interval and disease group",
-    x = "Age interval, months",
-    y = "Relative proportion among top 10 taxa",
-    fill = "Taxon"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    legend.position = "right",
-    axis.text.x = element_text(angle = 45, hjust = 1)
+save_table(alpha_final, "04_final_alpha_key_results.tsv")
+save_table(beta_final, "04_final_beta_key_results.tsv")
+save_table(taxa_final, "04_final_taxa_key_results.tsv")
+
+# alpha/beta는 FDR 열이 없으므로 taxa와 합치기 전 NA로 맞춤.
+alpha_beta_final <- dplyr::bind_rows(alpha_final, beta_final) |>
+  dplyr::mutate(p_adj_BH = NA_real_) |>
+  dplyr::select(
+    analysis, outcome, term, estimate, conf.low, conf.high, p.value, p_adj_BH, significance
   )
 
-print(p_composition_agebin)
+final_key_results <- dplyr::bind_rows(alpha_beta_final, taxa_final)
+
+save_table(final_key_results, "04_final_key_results_all.tsv")
+print(final_key_results)
 ```
-```{r
 
-}
+# 8. Session information
 
+```{r session-info}
+session_info_text <- capture.output(sessionInfo())
+writeLines(session_info_text, file.path(tab_dir, "99_sessionInfo.txt"))
+sessionInfo()
 ```

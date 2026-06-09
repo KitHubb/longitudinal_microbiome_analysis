@@ -1,0 +1,4 @@
+analysis	outcome	term	estimate	conf.low	conf.high	p.value	p_adj_BH	significance
+Beta diversity	Bray-Curtis distance from baseline	time_from_baseline_months	0.0218670163652233	0.0161860935462256	0.0275479391842209	9.8316425206428e-12	NA	p < 0.001
+Beta diversity	Bray-Curtis distance from baseline	study_conditionT1D	0.034993328197328	-0.170250706912469	0.240237363307125	0.7325764397982	NA	not significant
+Beta diversity	Bray-Curtis distance from baseline	time_from_baseline_months:study_conditionT1D	-0.00177038055990585	-0.0140309079220098	0.0104901468021981	0.775301671956437	NA	not significant
